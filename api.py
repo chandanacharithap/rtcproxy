@@ -7,10 +7,10 @@ app = Flask(__name__)
 CAP_DIR = "/var/log/rtc"
 STATE_FILE = "/tmp/rtc_capture.json"
 DEFAULT_IFACE = os.environ.get("RTC_IFACE", "wg0")
-DEFAULT_PEER_IP = os.environ.get("RTC_PEER_IP", "10.0.0.3")   # your phone's VPN IP inside WG
+DEFAULT_PEER_IP = os.environ.get("RTC_PEER_IP", "10.0.0.3")   
 API_PORT = int(os.environ.get("RTC_API_PORT", "5000"))
 API_BIND = os.environ.get("RTC_API_BIND", "0.0.0.0")
-API_KEY  = os.environ.get("RTC_API_KEY", "")  # set a simple header token to protect endpoints
+API_KEY  = os.environ.get("RTC_API_KEY", "")  
 
 os.makedirs(CAP_DIR, exist_ok=True)
 
@@ -48,12 +48,12 @@ def start_capture():
     iface  = request.args.get("iface", DEFAULT_IFACE)
     peer   = request.args.get("peer", DEFAULT_PEER_IP)
     flt    = request.args.get("filter")
-    # capture only your phone’s VPN traffic over TCP/UDP, excluding WG’s own port 51820
+   
     bpf    = flt if flt else f"host {peer} and (udp or tcp) and not port 51820"
 
     fname = os.path.join(CAP_DIR, f"rtc-{nowstamp()}.pcap")
     cmd = ["tcpdump", "-U", "-i", iface, "-w", fname, bpf]
-    # run tcpdump in its own process group so we can stop it cleanly
+    
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=os.setsid)
 
     st = {
