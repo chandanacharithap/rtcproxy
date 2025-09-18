@@ -1,4 +1,10 @@
-# RTC Proxy Lab – Quick Start
+# RTC Proxy Lab – Quick Start (FINAL)
+
+**Prove these three things:**
+- Phone exits the Internet from **VM1’s IP** (WireGuard).
+- Laptop exits the Internet from **VM2’s IP** (WireGuard).
+- WebRTC call relays via **TURN on VM2** (see `type=relay` + capture).
+
 ---
 
 ## 1) Azure (Portal)
@@ -6,7 +12,7 @@
 - Create **two** Ubuntu 22.04 VMs with **Public IP**: `vm1-wireguard`, `vm2-turn`
 - NSG rules:
   - **VM1**: UDP `51820`, TCP `22`
-  - **VM2**: UDP `51820`, TCP `22`, UDP **3478**, TCP **3478**, UDP **49160–49200**
+  - **VM2**: UDP `51820`, TCP `22`, UDP **3478**, TCP **3478**, UDP **49160–49200`
 
 ---
 
@@ -16,8 +22,11 @@ ssh -i <KEY> azureuser@<VM1_IP>
 sudo apt update && sudo apt -y install wireguard qrencode netfilter-persistent iptables-persistent
 
 umask 077
+# Generate server + phone keys (needed for QR and server peer section)
 wg genkey | tee ~/v1_server.key | wg pubkey > ~/v1_server.pub
+wg genkey | tee ~/phone.key     | wg pubkey > ~/phone.pub
 SERVER_PRIV=$(cat ~/v1_server.key); SERVER_PUB=$(cat ~/v1_server.pub)
+PHONE_PRIV=$(cat ~/phone.key);    PHONE_PUB=$(cat ~/phone.pub)
 
 echo "net.ipv4.ip_forward=1" | sudo tee /etc/sysctl.d/99-wg.conf
 sudo sysctl --system
@@ -116,29 +125,103 @@ Activate → “what’s my IP” = **VM2_IP** ✅
 
 ---
 
-## 4) Prove TURN relay (WebRTC)
-Open **Trickle ICE** page on both phone + laptop. Add TURN:
+## 4) Capture API Workflow (CloudLab server + Phone + Laptop)
+
+> Replace:
+> - `MYSECRET` → your API key
+> - `hp070.utah.cloudlab.us` (or `128.110.218.146`) → your CloudLab hostname/IP
+> - `10.0.0.3` → your peer IP behind WireGuard
+
+### A) On the CloudLab server (e.g., `hp070`)
+
+**1) Bring up WireGuard**
+```bash
+sudo wg-quick up wg0
+sudo wg
+```
+
+**2) Run the capture API (in tmux)**
+```bash
+sudo apt update && sudo apt install -y tmux
+tmux new -s rtc
+
+# repo & deps (if not already there)
+sudo apt update && sudo apt install -y git python3-pip tcpdump tshark
+cd /opt
+sudo git clone https://github.com/chandanacharithap/rtcproxy.git
+sudo chown -R $USER:$USER rtcproxy
+cd /opt/rtcproxy/rtcproxy
+
+# env + start (if your shell is bash, use 'export VAR=value' instead of 'setenv')
+setenv RTC_API_KEY "MYSECRET"
+setenv RTC_IFACE "wg0"
+setenv RTC_PEER_IP "10.0.0.3"
+sudo -E python3 api.py
+```
+- Detach: **Ctrl+B**, then **D**. Reattach: `tmux attach -t rtc`  
+- If you see “Port 5000 in use”:
+```bash
+sudo lsof -i :5000
+sudo fuser -k 5000/tcp
+```
+
+### B) On your phone
+- WireGuard app → toggle your tunnel **ON** (Endpoint example: `hp070.utah.cloudlab.us:51820`).
+
+### C) From your laptop (PowerShell)
+```powershell
+# Status
+Invoke-WebRequest -Uri "http://hp070.utah.cloudlab.us:5000/status" -Headers @{"X-API-Key"="MYSECRET"}
+
+# Start capture (place your call while VPN is ON)
+Invoke-WebRequest -Uri "http://hp070.utah.cloudlab.us:5000/start" -Method POST -Headers @{"X-API-Key"="MYSECRET"}
+
+# Stop capture
+Invoke-WebRequest -Uri "http://hp070.utah.cloudlab.us:5000/stop" -Method POST -Headers @{"X-API-Key"="MYSECRET"}
+
+# Download PCAP
+Invoke-WebRequest -Uri "http://hp070.utah.cloudlab.us:5000/download?file=current" -Headers @{"X-API-Key"="MYSECRET"} -OutFile "rtc_capture.pcap"
+```
+Open `rtc_capture.pcap` in Wireshark; handy filter: `stun or rtp or quic`.
+
+### D) Extras
+```bash
+# Restart wg after edits
+sudo wg-quick down wg0 && sudo wg-quick up wg0
+
+# Confirm a PCAP exists
+ls -lh /var/log/rtc/rtc-*.pcap
+```
+```powershell
+# Download a specific PCAP
+Invoke-WebRequest -Uri "http://hp070.utah.cloudlab.us:5000/download?file=/var/log/rtc/rtc-20250917-012628.pcap" -Headers @{"X-API-Key"="MYSECRET"} -OutFile "rtc_capture.pcap"
+```
+
+**DPI check & lookups (on server)**
+```bash
+cd /opt/rtcproxy/rtcproxy
+python3 check_dpi.py --pcap /var/log/rtc/rtc-20250917-012628.pcap
+tshark -r /var/log/rtc/rtc-20250917-012628.pcap -Y "stun" -T fields -e ip.src -e ip.dst | head -n 30
+python3 lookupip.py 31.13.66.53
+python3 lookupip.py 157.240.245.62
+```
+
+---
+
+## 5) Prove TURN relay (WebRTC)
+On **both** phone + laptop, open the **Trickle ICE** sample and add:
 - `turn:<VM2_PUBLIC_IP>:3478?transport=udp`
 - `turn:<VM2_PUBLIC_IP>:3478?transport=tcp`
-- Username: `labuser`  |  Password: `supersecretpassword`
+- Username: `labuser` | Password: `supersecretpassword`
 
-Start the test. You should see ICE candidates with **`type=relay`** and IP = **VM2_PUBLIC_IP**, port **49160–49200**. ✅
-
----
-
-## 5) Capture on laptop (Wireshark)
-- Start WG tunnel (to VM2) **ON**
-- Wireshark filter options:
-  - `udp.port == 3478`
-  - `ip.addr == <VM2_PUBLIC_IP> && udp.port >= 49160 && udp.port <= 49200`
-
-You’ll see STUN/TURN to `:3478` and media to/from `49160–49200/udp`.
+You should see ICE candidates with **`type=relay`**, IP = **<VM2_PUBLIC_IP>**, port **49160–49200**. ✅
 
 ---
 
-## Troubleshooting 
+## Troubleshooting (super short)
 - No VPN? Check NSG ports, `sudo wg show`, `sysctl net.ipv4.ip_forward`, iptables PostUp rules.
 - No relay? Confirm TURN IP/creds, NSG ports 3478 UDP/TCP + 49160–49200 UDP, try `?transport=tcp`, restart coturn.
+- API busy? Kill port 5000 (see above).
 
 ---
 
@@ -153,5 +236,3 @@ turnserver.conf" > .gitignore
 git init && git add . && git commit -m "init"
 # push to a new private repo (use GitHub or gh cli)
 ```
-
-That’s it. Phone on **VM1**, Laptop on **VM2**, TURN on VM2 = verified relay. 🚀
