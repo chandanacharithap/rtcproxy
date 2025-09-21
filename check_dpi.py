@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
 """
-check_dpi.py — simple relay detector for RTC pcaps
+check_dpi.py — relay detector + (best-effort) location inference
 
 What it does
 ------------
-- Counts STUN/TURN, RTP, RTCP, and QUIC/443 frames in the pcap (via tshark).
-- Prints top UDP destination IPs (public) to help spot relays when traffic is
-  not classic RTP (e.g., Zoom/WhatsApp QUIC or app-proprietary UDP).
-- Picks likely relay IPs using this order:
-    1) UDP relay range 49160–49200 (TURN media)
-    2) TURN control on 3478 (UDP/TCP)
-    3) QUIC on UDP/443
-    4) Fallback: heaviest UDP conversation peers (public)
-- Enriches relay IPs with geo/ASN using local lookupip.py if present.
+- Counts STUN/TURN, RTP, and QUIC traffic in the pcap.
+- Picks likely relay IPs (TURN relay ports, TURN ctrl 3478, QUIC:443, or top UDP peers).
+- Enriches IPs (if lookupip.py exists).
+- NEW: infers the *actual* relay region via UDP traceroute rDNS and RTT heuristics.
 
 Usage
 -----
-python3 check_dpi.py --pcap /var/log/rtc/xyz.pcap
-python3 check_dpi.py --latest
-python3 check_dpi.py --pcap /var/log/rtc/xyz.pcap --json /var/log/rtc/xyz_summary.json
+python3 check_dpi.py --pcap /var/log/rtc/zoom_all.pcap
+python3 check_dpi.py --pcap /var/log/rtc/zoom_all.pcap --json /tmp/out.json
+python3 check_dpi.py --pcap /var/log/rtc/zoom_all.pcap --locate-port 8801
 """
 
 import argparse
@@ -32,256 +27,260 @@ import sys
 from collections import Counter
 from typing import Dict, List, Tuple, Optional
 
-TURN_RELAY_RANGE = (49160, 49200)   # your coturn media ports (adjust if different)
-TURN_CTRL_PORT   = 3478
+# ---------- small utils ----------
 
-# ---------- shell helpers ----------
-
-def run(cmd: str) -> str:
-    """Run a shell command and return stdout as UTF-8 string. Raise on non-zero exit."""
-    proc = subprocess.run(
-        shlex.split(cmd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
+def run(cmd: str, timeout: int = 20) -> str:
+    p = subprocess.run(
+        cmd if isinstance(cmd, list) else shlex.split(cmd),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout
     )
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"cmd failed: {cmd}\nSTDERR:\n{proc.stderr.decode(errors='ignore')}"
-        )
-    return proc.stdout.decode(errors='ignore')
+    if p.returncode != 0:
+        raise RuntimeError(f"cmd failed: {cmd}\nSTDERR:\n{p.stderr.decode(errors='ignore')}")
+    return p.stdout.decode(errors='ignore')
 
-def tshark_available() -> bool:
+def run_ok(cmd: str, timeout: int = 20) -> Optional[str]:
     try:
-        out = run("tshark -v")
-        return bool(out)
+        return run(cmd, timeout=timeout)
     except Exception:
-        return False
+        return None
 
-# ---------- utils ----------
+def have(cmd: str) -> bool:
+    return subprocess.run(["bash","-lc", f"command -v {shlex.quote(cmd)} >/dev/null 2>&1"]).returncode == 0
 
 def is_private_ip(ip: str) -> bool:
     try:
         return ipaddress.ip_address(ip).is_private
     except Exception:
-        # If parsing fails, exclude it as a relay candidate
         return True
 
-def my_nic_ip(pcap_hint: Optional[str] = None) -> Optional[str]:
-    """Best-effort: detect the VM's IP on common NIC names to attribute conv rows."""
-    for nic in ("eth0", "ens160", "ens33"):
-        try:
-            out = run(f"ip -4 addr show {nic}")
-            m = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)/", out)
-            if m:
-                return m.group(1)
-        except Exception:
-            pass
+def tshark_available() -> bool:
+    return have("tshark")
+
+def my_nic_ip() -> Optional[str]:
+    for nic in ("eth0", "ens33", "ens160"):
+        out = run_ok(f"ip -4 addr show {nic}")
+        if not out:
+            continue
+        m = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)/", out)
+        if m:
+            return m.group(1)
     return None
 
-def latest_pcap(default_dir: str = "/var/log/rtc", pattern: str = "rtc-*.pcap") -> Optional[str]:
-    """Return path to most recent pcap matching pattern in default_dir."""
-    try:
-        out = run(f"bash -lc 'ls -t {shlex.quote(default_dir)}/{shlex.quote(pattern)} 2>/dev/null | head -n 1'")
-        p = out.strip()
-        return p if p else None
-    except Exception:
-        return None
-
-# ---------- tshark wrappers ----------
+# ---------- tshark helpers ----------
 
 def count_filter(pcap: str, display_filter: str) -> int:
-    """
-    Count frames matching a tshark display filter.
-    """
-    cmd = f'tshark -r {shlex.quote(pcap)} -Y {shlex.quote(display_filter)} -T fields -e frame.number'
-    try:
-        out = run(cmd)
-    except RuntimeError:
+    out = run_ok(f'tshark -r {shlex.quote(pcap)} -Y {shlex.quote(display_filter)} -T fields -e frame.number')
+    if not out:
         return 0
     s = out.strip()
     return 0 if not s else len(s.splitlines())
 
-def ip_pairs(pcap: str, display_filter: str) -> List[Tuple[str, str]]:
-    """
-    Return [(ip.src, ip.dst), ...] for frames matching the filter.
-    """
-    cmd = f'tshark -r {shlex.quote(pcap)} -Y {shlex.quote(display_filter)} -T fields -e ip.src -e ip.dst'
-    try:
-        out = run(cmd)
-    except RuntimeError:
+def ip_pairs(pcap: str, display_filter: str) -> List[Tuple[str,str]]:
+    out = run_ok(f'tshark -r {shlex.quote(pcap)} -Y {shlex.quote(display_filter)} -T fields -e ip.src -e ip.dst')
+    if not out:
         return []
-    pairs: List[Tuple[str, str]] = []
+    pairs = []
     for line in out.splitlines():
         parts = line.split("\t")
-        if len(parts) >= 2:
-            s, d = parts[0].strip(), parts[1].strip()
-            if s and d:
-                pairs.append((s, d))
+        if len(parts) >= 2 and parts[0] and parts[1]:
+            pairs.append((parts[0].strip(), parts[1].strip()))
     return pairs
 
-def conv_table_udp_other_ips(pcap: str) -> Counter:
-    """
-    Use tshark conv,udp and attribute 'other side' relative to this host IP
-    to count frames per peer (public only). Returns Counter[ip]=frames.
-    """
-    cmd = f'tshark -r {shlex.quote(pcap)} -q -z conv,udp'
-    try:
-        out = run(cmd)
-    except RuntimeError:
-        return Counter()
-
-    rows = []
-    for line in out.splitlines():
-        if "<->" in line and ":" in line:
-            try:
-                left, right = line.split("<->")
-                left = left.strip().split()[0]   # "IP:port"
-                right = right.strip().split()[0]
-                def ip_of(ep: str) -> Optional[str]:
-                    m = re.match(r"(\d+\.\d+\.\d+\.\d+):\d+", ep)
-                    return m.group(1) if m else None
-                l_ip, r_ip = ip_of(left), ip_of(right)
-                # Extract the trailing "frames" count (best-effort)
-                m2 = re.findall(r"\s(\d+)\s+[0-9A-Za-z]+?\s*$", line)
-                frames_total = int(m2[-1][0]) if m2 else 0
-                if l_ip and r_ip:
-                    rows.append(((l_ip, r_ip), frames_total))
-            except Exception:
-                pass
-
-    myip = my_nic_ip()
-    c = Counter()
-    for (a, b), frames in rows:
-        if myip:
-            other = b if a == myip else a if b == myip else None
-        else:
-            # Unknown local IP—just pick the public one if exactly one is public
-            if not is_private_ip(a) and is_private_ip(b):
-                other = a
-            elif not is_private_ip(b) and is_private_ip(a):
-                other = b
-            else:
-                other = None
-        if other and not is_private_ip(other):
-            c[other] += frames
-    return c
-
-def top_udp_dests(pcap: str, limit: int = 10) -> List[Tuple[str, int]]:
-    """
-    Return top UDP destination IPs (public only) by hit count.
-    """
-    cmd = f'tshark -r {shlex.quote(pcap)} -Y udp -T fields -e ip.dst'
-    try:
-        out = run(cmd)
-    except RuntimeError:
+def conv_table_udp_top_ips(pcap: str) -> List[Tuple[str,int]]:
+    out = run_ok(f'tshark -r {shlex.quote(pcap)} -q -z conv,udp')
+    if not out:
         return []
-    c = Counter()
+    myip = my_nic_ip()
+    frames_by_ip: Counter = Counter()
     for line in out.splitlines():
-        ip = line.strip()
-        if ip and not is_private_ip(ip):
-            c[ip] += 1
-    return c.most_common(limit)
+        if "<->" not in line or ":" not in line:
+            continue
+        try:
+            left, right = line.split("<->")
+            left = left.strip().split()[0]
+            right = right.strip().split()[0]
+            def ep_ip(ep: str) -> Optional[str]:
+                m = re.match(r"(\d+\.\d+\.\d+\.\d+):\d+", ep)
+                return m.group(1) if m else None
+            a, b = ep_ip(left), ep_ip(right)
+            m2 = re.findall(r"\s(\d+)\s+[0-9A-Za-z]+\s*$", line)
+            frames = int(m2[-1][0]) if m2 else 0
+            if frames <= 0 or not a or not b:
+                continue
+            if myip:
+                other = b if a == myip else a if b == myip else None
+            else:
+                other = b if not is_private_ip(b) else a if not is_private_ip(a) else None
+            if other and not is_private_ip(other):
+                frames_by_ip[other] += frames
+        except Exception:
+            pass
+    return [(ip, n) for ip, n in frames_by_ip.most_common()]
 
 # ---------- relay picking ----------
 
+TURN_RELAY_RANGE = (49160, 49200)
+TURN_CTRL_PORT = 3478
+
 def pick_relays(pcap: str) -> Dict[str, int]:
-    """
-    Return dict ip->score for likely relay IPs in this pcap.
-    Strategy:
-      1) Any IP seen on UDP relay range (49160–49200) -> strong weight
-      2) Any IP seen on TURN control port 3478 (UDP/TCP) -> medium weight
-      3) QUIC peers on UDP/443 -> medium-low weight
-      4) Fallback: heavy UDP conversation peers -> low weight
-    """
-    candidates: Counter = Counter()
+    cand: Counter = Counter()
 
-    # 1) Relay media range
-    relay_pairs = ip_pairs(pcap, f"udp && udp.port>={TURN_RELAY_RANGE[0]} && udp.port<={TURN_RELAY_RANGE[1]}")
-    for s, d in relay_pairs:
-        for ip in (s, d):
+    # 1) Known relay ports (TURN data)
+    rel = ip_pairs(pcap, f"udp && udp.port>={TURN_RELAY_RANGE[0]} && udp.port<={TURN_RELAY_RANGE[1]}")
+    for s,d in rel:
+        for ip in (s,d):
             if not is_private_ip(ip):
-                candidates[ip] += 10
+                cand[ip] += 10
 
-    # 2) TURN control
-    for filt in (f"udp.port=={TURN_CTRL_PORT}", f"tcp.port=={TURN_CTRL_PORT}"):
-        pairs = ip_pairs(pcap, filt)
-        for s, d in pairs:
-            for ip in (s, d):
+    # 2) TURN control 3478 (udp/tcp)
+    for disp in (f"udp.port=={TURN_CTRL_PORT}", f"tcp.port=={TURN_CTRL_PORT}"):
+        pairs = ip_pairs(pcap, disp)
+        for s,d in pairs:
+            for ip in (s,d):
                 if not is_private_ip(ip):
-                    candidates[ip] += 5
+                    cand[ip] += 5
+    if cand:
+        return dict(cand)
 
-    if candidates:
-        return dict(candidates)
-
-    # 3) QUIC on 443
-    quic_pairs = ip_pairs(pcap, "quic && udp.port==443")
-    for s, d in quic_pairs:
-        for ip in (s, d):
+    # 3) QUIC:443
+    for s,d in ip_pairs(pcap, "quic && udp.port==443"):
+        for ip in (s,d):
             if not is_private_ip(ip):
-                candidates[ip] += 3
+                cand[ip] += 3
+    if cand:
+        return dict(cand)
 
-    if candidates:
-        return dict(candidates)
-
-    # 4) Fallback: heavy UDP conv peers
-    conv = conv_table_udp_other_ips(pcap)
-    for ip, frames in conv.items():
-        if ip in ("1.1.1.1", "8.8.8.8"):  # ignore obvious DNS resolvers
+    # 4) Fallback: heavy UDP peers
+    for ip, frames in conv_table_udp_top_ips(pcap):
+        if ip in ("1.1.1.1","1.0.0.1","8.8.8.8"):
             continue
-        candidates[ip] += max(1, min(frames // 50, 5))
+        cand[ip] += max(1, min(frames // 50, 5))
+    return dict(cand)
 
-    return dict(candidates)
+# ---------- location inference ----------
 
-# ---------- enrichment ----------
+CITY_HINTS = {
+    # EU (add more if you like)
+    "ams": "Amsterdam", "adam": "Amsterdam", "nl-ams": "Amsterdam",
+    "fra": "Frankfurt", "de-fra": "Frankfurt",
+    "lhr": "London", "lon": "London", "uk-lon": "London",
+    "cdg": "Paris", "par": "Paris",
+    "waw": "Warsaw", "mad": "Madrid", "mil": "Milan",
+    "vie": "Vienna", "bru": "Brussels", "cph": "Copenhagen",
+    "arn": "Stockholm", "osl": "Oslo", "hel": "Helsinki",
+    "zrh": "Zurich", "dub": "Dublin",
+    # US (common Zoom/Cloud names)
+    "sjc": "San Jose", "sfo": "San Francisco", "lax":"Los Angeles",
+    "iad": "Ashburn", "dfw":"Dallas", "ord":"Chicago", "nyc":"New York",
+}
+
+def _infer_from_rdns(ip: str, media_port: int) -> Optional[str]:
+    """
+    Run UDP traceroute with rDNS and try to read city codes in the last 3 resolved hopnames.
+    """
+    if not have("traceroute"):
+        return None
+    # rDNS on (no -n), UDP to media port
+    out = run_ok(f"sudo traceroute -q 1 -U -p {media_port} {ip}", timeout=25)
+    if not out:
+        return None
+    names = []
+    for line in out.splitlines():
+        # example:  8  ae-1-350.ams10.core.example.net (203.0.113.1)  12.3 ms
+        m = re.search(r"^\s*\d+\s+([^\s(]+)", line)
+        if m:
+            host = m.group(1).lower()
+            # ignore pure IPs
+            if re.match(r"^\d+\.\d+\.\d+\.\d+$", host):
+                continue
+            names.append(host)
+    for host in names[-4:]:  # last few hops near the target
+        for key, city in CITY_HINTS.items():
+            if key in host:
+                return city
+    return None
+
+def _infer_from_rtt(ip: str, media_port: int) -> Optional[str]:
+    """
+    Use mtr or ping RTT as a rough region hint.
+    """
+    # mtr in report mode (no curses)
+    if have("mtr"):
+        out = run_ok(f"mtr -uz -P {media_port} -c 10 -r {ip}", timeout=25)
+        if out:
+            # find last hop avg or last line latency
+            last = out.strip().splitlines()[-1]
+            ms = re.findall(r"(\d+\.\d+|\d+)\s*ms", last)
+            if ms:
+                try:
+                    r = float(ms[-1])
+                    # very rough EU buckets (tweak for your AZ region)
+                    if r < 8:   return "Same-DC/Metro"
+                    if r < 20:  return "Nearby EU (NL/DE/UK)"
+                    if r < 35:  return "Regional EU"
+                    if r < 70:  return "In-Europe (farther)"
+                    return "Intercontinental?"
+                except:
+                    pass
+    # ping fallback
+    out = run_ok(f"ping -n -c 4 {ip}", timeout=10)
+    if out:
+        m = re.search(r"rtt min/avg/max/[a-z]+ = .*?/(\d+\.\d+)/", out)
+        if m:
+            try:
+                r = float(m.group(1))
+                if r < 8:   return "Same-DC/Metro"
+                if r < 20:  return "Nearby EU (NL/DE/UK)"
+                if r < 35:  return "Regional EU"
+                if r < 70:  return "In-Europe (farther)"
+                return "Intercontinental?"
+            except:
+                pass
+    return None
+
+def infer_location(ip: str, media_port: int = 8801) -> Optional[str]:
+    # 1) try hopnames
+    city = _infer_from_rdns(ip, media_port)
+    if city:
+        return city
+    # 2) try RTT buckets
+    return _infer_from_rtt(ip, media_port)
+
+# ---------- enrich ----------
 
 def enrich_ip(ip: str) -> Dict[str, str]:
-    """
-    Use local lookupip.py (in same dir) to add geo/ASN where available.
-    """
     ret = {"ip": ip}
     here = os.path.dirname(os.path.abspath(__file__))
     script = os.path.join(here, "lookupip.py")
     if os.path.isfile(script):
-        try:
-            out = run(f"python3 {shlex.quote(script)} {shlex.quote(ip)}")
+        out = run_ok(f"python3 {shlex.quote(script)} {shlex.quote(ip)}")
+        if out:
             for line in out.splitlines():
                 if ":" in line:
                     k, v = line.split(":", 1)
                     ret[k.strip().lower().replace(" ", "_")] = v.strip()
-        except Exception as e:
-            ret["lookup_error"] = str(e)
     return ret
 
 # ---------- main ----------
 
 def main():
-    ap = argparse.ArgumentParser(description="Detect relay IPs in a pcap (RTP/STUN/TURN/QUIC aware).")
-    ap.add_argument("--pcap", help="Path to pcap file")
-    ap.add_argument("--latest", action="store_true", help="Use newest /var/log/rtc/rtc-*.pcap automatically")
+    ap = argparse.ArgumentParser(description="Detect RTC relays and infer their real location.")
+    ap.add_argument("--pcap", required=True, help="Path to pcap file")
     ap.add_argument("--json", help="Optional path to write JSON summary")
+    ap.add_argument("--locate-port", type=int, default=8801, help="UDP port to probe for location inference (Zoom=8801)")
     args = ap.parse_args()
 
     if not tshark_available():
-        print("ERROR: tshark is not installed (sudo apt-get install -y tshark)", file=sys.stderr)
+        print("ERROR: tshark is not installed (apt-get install tshark)", file=sys.stderr)
         sys.exit(2)
 
-    # Resolve target pcap
-    pcap: Optional[str] = None
-    if args.latest:
-        pcap = latest_pcap()
-        if not pcap:
-            print("No pcap files found under /var/log/rtc.", file=sys.stderr)
-            sys.exit(2)
-    elif args.pcap:
-        pcap = args.pcap
-
-    if not pcap or not os.path.isfile(pcap):
-        print(f"File not found: {pcap!r}", file=sys.stderr)
+    pcap = args.pcap
+    if not os.path.isfile(pcap):
+        print(f"File not found: {pcap}", file=sys.stderr)
         sys.exit(2)
 
     print(pcap)
 
-    # Basic counts
     counts = {
         "stun": count_filter(pcap, "stun"),
         "rtp":  count_filter(pcap, "rtp"),
@@ -290,63 +289,56 @@ def main():
     }
     print(f"Counts: STUN={counts['stun']}  RTP={counts['rtp']}  RTCP={counts['rtcp']}  QUIC443={counts['quic']}")
 
-    # RTP flows
     rtp_pairs = ip_pairs(pcap, "rtp")
-    rtp_counter = Counter()
-    for s, d in rtp_pairs:
-        rtp_counter[(s, d)] += 1
+    rtp_counter: Counter = Counter()
+    for s,d in rtp_pairs:
+        rtp_counter[(s,d)] += 1
     if rtp_counter:
         print("\nRTP Flows (most->least):")
-        for (s, d), n in rtp_counter.most_common(12):
+        for (s,d), n in rtp_counter.most_common(12):
             print(f"  {s:<15} -> {d:<15}  packets={n}")
     else:
         print("\nRTP Flows (most->least):\n  (none)")
 
-    # Show top UDP destination IPs always (helps when RTP=0)
-    udp_top = top_udp_dests(pcap, limit=10)
-    if udp_top:
-        print("\nTop UDP destination IPs (public):")
-        for ip, hits in udp_top:
-            print(f"  {ip:<15} hits={hits}")
-
     # Relay picking
     relay_scores = pick_relays(pcap)
     relay_sorted = sorted(relay_scores.items(), key=lambda kv: kv[1], reverse=True)
-    relay_ips = [ip for ip, _ in relay_sorted]
-
-    # If heuristics above found nothing, fall back to UDP top
-    if not relay_ips and udp_top:
-        relay_sorted = [(ip, hits) for ip, hits in udp_top]
-        relay_ips = [ip for ip, _ in udp_top]
+    relay_ips = [ip for ip,_ in relay_sorted]
 
     print("\nRelay IPs (by score):")
     if not relay_ips:
-        print("  (none found — try a longer capture and ensure both ends traverse your VPN/TURN)")
+        print("  (none found — try longer capture, ensure both ends traverse your VPN/TURN)")
     else:
         for ip, score in relay_sorted[:10]:
             info = enrich_ip(ip)
             label = []
-            for k in ("city", "region", "country", "asn"):
+            for k in ("city","region","country","asn"):
                 if k in info and info[k]:
                     label.append(info[k])
+            inferred = infer_location(ip, media_port=args.locate_port)
+            if inferred:
+                label.append(f"inferred={inferred}")
             label_str = " | ".join(label) if label else ""
             print(f"  {ip:<15}  score={score}  {label_str}")
 
         print("\nThe relay IP(s): " + ", ".join(relay_ips[:3]))
 
-    # Optional JSON out
     if args.json:
         out = {
             "pcap": pcap,
             "counts": counts,
-            "rtp_pairs_top": [{"src": s, "dst": d, "packets": n} for (s, d), n in rtp_counter.most_common(20)],
-            "udp_dsts_top": [{"ip": ip, "hits": hits} for ip, hits in udp_top],
-            "relays": [{"ip": ip, "score": score, "enrich": enrich_ip(ip)} for ip, score in relay_sorted[:10]],
+            "rtp_pairs_top": [{"src": s, "dst": d, "packets": n} for (s,d), n in rtp_counter.most_common(20)],
+            "relays": [
+                {
+                    "ip": ip,
+                    "score": score,
+                    "enrich": enrich_ip(ip),
+                    "inferred_location": infer_location(ip, media_port=args.locate_port)
+                }
+                for ip,score in relay_sorted[:10]
+            ],
         }
-        try:
-            os.makedirs(os.path.dirname(args.json), exist_ok=True)
-        except Exception:
-            pass
+        os.makedirs(os.path.dirname(args.json), exist_ok=True)
         with open(args.json, "w") as f:
             json.dump(out, f, indent=2)
         print(f"\nWrote JSON: {args.json}")
