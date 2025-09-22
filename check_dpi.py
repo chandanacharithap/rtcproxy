@@ -139,11 +139,19 @@ def main():
     else:
         for ip,hits in relays[:10]:
             parts=[]; info=enrich_ip(ip)
+
+            # Always prefer enrichment data first
             for k in("city","region","country","asn","isp"):
-                if k in info and info[k]: parts.append(info[k])
-            parts.append(infer_location(ip,args.locate_port))
-            label=" | ".join(parts) if parts else ""
+                if k in info and info[k]:
+                    parts.append(info[k])
+
+            # Add traceroute/RTT inference only if it found something useful
+            inferred = infer_location(ip,args.locate_port)
+            if inferred and inferred != "location=unknown":
+                parts.append(inferred)
+
+            label = " | ".join(parts) if parts else ""
             print(f"  {ip:<15}  hits={hits}  {label}")
-        print("\nThe relay IP(s): "+", ".join([ip for ip,_ in relays[:3]]))
+
 
 if __name__=="__main__": main()
