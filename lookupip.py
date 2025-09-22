@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-lookupip.py — Enrich relay IP with rDNS hostname + PoP detection
+lookupip.py — Enrich relay IP with PoP detection priority.
+- Prefer rDNS with city code (ams, fra, lhr, etc.)
+- Fall back to traceroute rDNS hints
+- Last resort: GeoIP database
 """
 
-import sys, socket, requests
+import sys, socket, re, requests, subprocess, shlex
 
 CITY_HINTS = {
-    # EU
     "ams": "Amsterdam", "fra": "Frankfurt", "lhr": "London",
     "cdg": "Paris", "mad": "Madrid", "waw": "Warsaw", "mil": "Milan",
     "vie": "Vienna", "bru": "Brussels", "cph": "Copenhagen",
     "arn": "Stockholm", "osl": "Oslo", "hel": "Helsinki",
     "zrh": "Zurich", "dub": "Dublin",
-    # US
     "sjc": "San Jose", "sfo": "San Francisco", "lax": "Los Angeles",
     "iad": "Ashburn", "dfw": "Dallas", "ord": "Chicago", "nyc": "New York",
 }
@@ -23,10 +24,29 @@ def reverse_dns(ip: str) -> str:
     except Exception:
         return ""
 
-def guess_pop_from_rdns(hostname: str) -> str:
+def guess_city_from_rdns(hostname: str) -> str:
     for key, city in CITY_HINTS.items():
         if key in hostname:
             return city
+    return ""
+
+def traceroute_guess(ip: str, port: int = 8801) -> str:
+    try:
+        out = subprocess.run(
+            shlex.split(f"traceroute -q1 -U -p {port} {ip}"),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20
+        )
+        lines = out.stdout.decode(errors="ignore").splitlines()
+        for line in lines[-4:]:  # last hops
+            m = re.search(r"\s+\d+\s+([^\s(]+)", line)
+            if not m:
+                continue
+            host = m.group(1).lower()
+            for key, city in CITY_HINTS.items():
+                if key in host:
+                    return city
+    except Exception:
+        pass
     return ""
 
 def geoip_fallback(ip: str) -> dict:
@@ -41,16 +61,22 @@ def geoip_fallback(ip: str) -> dict:
 def enrich(ip: str) -> dict:
     out = {"ip": ip}
 
-    # Try rDNS → PoP
+    # Step 1: reverse DNS check
     rdns = reverse_dns(ip)
     if rdns:
         out["rdns"] = rdns
-        pop = guess_pop_from_rdns(rdns)
-        if pop:
-            out["pop"] = pop
-            return out  # strong signal: stop here
+        city = guess_city_from_rdns(rdns)
+        if city:
+            out["pop"] = city
+            return out  # PoP detected, highest priority
 
-    # Fallback: GeoIP
+    # Step 2: traceroute last hops
+    tr_city = traceroute_guess(ip)
+    if tr_city:
+        out["pop"] = tr_city
+        return out
+
+    # Step 3: fallback GeoIP
     geo = geoip_fallback(ip)
     if geo:
         out.update({
