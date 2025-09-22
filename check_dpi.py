@@ -4,16 +4,22 @@ check_dpi.py — summarize RTC media + relay IPs from a pcap
 
 Adds:
 - Counts: STUN / RTP / RTCP / QUIC:443
-- Top peers (Zoom media on 8801, QUIC on 443)
-- Likely relay IPs (public first)
+- RTP decoding with Zoom (8801) and generic RTP ports (5004, 8000, …)
+- Top peers
+- Likely relay IPs (TURN, 8801, QUIC, heavy UDP)
 - Enrichment via lookupip.py if present
 - Best-effort PoP inference via traceroute/mtr + RTT
-- Prints last 3 hops from traceroute to show actual PoP
 """
 
 import argparse, ipaddress, json, os, re, shlex, subprocess, sys
 from collections import Counter
 from typing import Dict, List, Tuple, Optional
+
+# --- Ports / Hints ---
+TURN_RELAY_RANGE = (49160, 49200)   # typical coturn relay range
+TURN_CTRL_PORT   = 3478
+ZOOM_RTP_PORTS   = [8801]
+RTP_HINTS        = [5004, 8000]
 
 CITY_HINTS = {
     # EU
@@ -30,6 +36,7 @@ CITY_HINTS = {
     "iad": "Ashburn", "dfw": "Dallas", "ord": "Chicago", "nyc": "New York",
 }
 
+# --- Shell helpers ---
 def run(cmd, timeout=30) -> str:
     p = subprocess.run(cmd if isinstance(cmd, list) else shlex.split(cmd),
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
@@ -57,11 +64,50 @@ def top_counts(pcap, filt, field="ip.dst", limit=15, extra_args="") -> List[Tupl
     c = Counter([x.strip() for x in out.splitlines() if x.strip()])
     return c.most_common(limit)
 
-# --- relay picking ---
-def pick_relays_from_media(media): return [(ip,n) for ip,n in media if not is_private_ip(ip)]
-def pick_relays_from_quic(quic):  return [(ip,n) for ip,n in quic if not is_private_ip(ip)]
+def _decode_as_rtp_count(pcap: str, port: int) -> int:
+    out = run_ok(f'tshark -r {shlex.quote(pcap)} -d udp.port=={port},rtp -Y rtp -T fields -e frame.number')
+    return len(out.splitlines()) if out else 0
 
-# --- location inference ---
+# --- RTP decoding w/ hints ---
+def count_rtp_with_hints(pcap: str) -> int:
+    n = tshark_count(pcap, "rtp")
+    if n > 0:
+        return n
+    for p in list(dict.fromkeys(ZOOM_RTP_PORTS + RTP_HINTS)):
+        n = _decode_as_rtp_count(pcap, p)
+        if n > 0:
+            return n
+    return 0
+
+# --- Relay picking ---
+def pick_relays(pcap: str) -> List[Tuple[str,int]]:
+    cand: Counter = Counter()
+
+    # TURN relay UDP ports
+    for disp in [f"udp.port>={TURN_RELAY_RANGE[0]} && udp.port<={TURN_RELAY_RANGE[1]}"]:
+        for ip,n in top_counts(pcap, disp, "ip.dst"):
+            if not is_private_ip(ip):
+                cand[ip] += n
+
+    # TURN control
+    for disp in (f"udp.port=={TURN_CTRL_PORT}", f"tcp.port=={TURN_CTRL_PORT}"):
+        for ip,n in top_counts(pcap, disp, "ip.dst"):
+            if not is_private_ip(ip):
+                cand[ip] += n
+
+    # Zoom media (udp/8801)
+    for ip,n in top_counts(pcap, "udp.port==8801", "ip.dst"):
+        if not is_private_ip(ip):
+            cand[ip] += n
+
+    # QUIC
+    for ip,n in top_counts(pcap, "quic && udp.port==443", "ip.dst"):
+        if not is_private_ip(ip):
+            cand[ip] += n
+
+    return cand.most_common(10)
+
+# --- Location inference ---
 def infer_location(ip: str, port: int=8801) -> Tuple[Optional[str],List[str]]:
     hops=[]
     if have("traceroute"):
@@ -75,19 +121,6 @@ def infer_location(ip: str, port: int=8801) -> Tuple[Optional[str],List[str]]:
                     if not re.match(r"^\d+\.\d+\.\d+\.\d+$",host):
                         for k,city in CITY_HINTS.items():
                             if k in host: return city,hops
-    # RTT fallback
-    out=run_ok(f"ping -n -c 4 {ip}",timeout=10)
-    if out:
-        m=re.search(r"rtt min/avg/max/[a-z]+ = .*?/(\d+\.\d+)/",out)
-        if m:
-            try:
-                r=float(m.group(1))
-                if r<8: return "Same-DC/Metro",hops
-                if r<20: return "Nearby EU",hops
-                if r<35: return "Regional EU",hops
-                if r<70: return "In-Europe",hops
-                return "Intercontinental?",hops
-            except: pass
     return None,hops
 
 # --- enrichment ---
@@ -116,14 +149,13 @@ def main():
     print(pcap)
 
     stun=tshark_count(pcap,"stun","-d udp.port==8801,stun")
-    rtp=tshark_count(pcap,"rtp","-d udp.port==8801,rtp")
+    rtp=count_rtp_with_hints(pcap)
     rtcp=tshark_count(pcap,"rtcp","-d udp.port==8801,rtcp")
     quic=tshark_count(pcap,"quic && udp.port==443")
-    if stun==0: stun=tshark_count(pcap,"udp.port==8801")
-    if rtcp==0: rtcp=tshark_count(pcap,"udp.port==8801")
     counts={"stun":stun,"rtp":rtp,"rtcp":rtcp,"quic":quic}
     print(f"Counts: STUN={stun}  RTP={rtp}  RTCP={rtcp}  QUIC443={quic}")
 
+    # Peers
     media=top_counts(pcap,"udp.port==8801","ip.dst",20)
     quic_peers=top_counts(pcap,"quic && udp.port==443","ip.dst",15)
     print("\nTop UDP/8801 peers (dst):")
@@ -132,11 +164,12 @@ def main():
         print("\nTop QUIC/443 peers (dst):")
         [print(f"  {ip:<15}  packets={n}") for ip,n in quic_peers]
 
-    relays=pick_relays_from_media(media) or pick_relays_from_quic(quic_peers)
+    # Relays
+    relays=pick_relays(pcap)
     print("\nRelay IPs (by hits):")
     if not relays: print("  (none)")
     else:
-        for ip,hits in relays[:10]:
+        for ip,hits in relays:
             parts=[]; info=enrich_ip(ip)
             for k in("city","region","country","asn","isp"):
                 if k in info and info[k]: parts.append(info[k])
