@@ -10,12 +10,6 @@ What you get
 - Likely relay IPs (public peers on 8801 first, else QUIC)
 - Enrichment via local lookupip.py (city/region/country/ISP/etc., if that script exists)
 - Best-effort PoP location inference via traceroute rDNS hints + RTT buckets
-
-Usage
------
-python3 check_dpi.py --pcap /var/log/rtc/rtc-*.pcap
-python3 check_dpi.py --pcap /var/log/rtc/rtc-*.pcap --locate-port 8801
-python3 check_dpi.py --pcap /path/file.pcap --json /tmp/out.json
 """
 
 import argparse
@@ -47,7 +41,6 @@ CITY_HINTS = {
 }
 
 def run(cmd, timeout: int = 30) -> str:
-    """Run a shell command and return stdout as UTF-8 (raise if non-zero)."""
     p = subprocess.run(cmd if isinstance(cmd, list) else shlex.split(cmd),
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     if p.returncode != 0:
@@ -71,20 +64,20 @@ def is_private_ip(ip: str) -> bool:
     try:
         return ipaddress.ip_address(ip).is_private
     except Exception:
-        return True  # treat malformed as private to avoid false relays
+        return True
 
 # ---------------- tshark helpers ----------------
 
-def tshark_count(pcap: str, display_filter: str) -> int:
-    out = run_ok(f'tshark -r {shlex.quote(pcap)} -Y {shlex.quote(display_filter)} -T fields -e frame.number')
+def tshark_count(pcap: str, display_filter: str, extra_args: str = "") -> int:
+    cmd = f'tshark -r {shlex.quote(pcap)} {extra_args} -Y {shlex.quote(display_filter)} -T fields -e frame.number'
+    out = run_ok(cmd)
     if not out:
         return 0
-    lines = [ln for ln in out.splitlines() if ln.strip()]
-    return len(lines)
+    return len([ln for ln in out.splitlines() if ln.strip()])
 
-def top_counts(pcap: str, display_filter: str, field: str = "ip.dst", limit: int = 15) -> List[Tuple[str, int]]:
-    """Return top values for a given tshark field under a display filter."""
-    out = run_ok(f'tshark -r {shlex.quote(pcap)} -Y {shlex.quote(display_filter)} -T fields -e {field}')
+def top_counts(pcap: str, display_filter: str, field: str = "ip.dst", limit: int = 15, extra_args: str = "") -> List[Tuple[str, int]]:
+    cmd = f'tshark -r {shlex.quote(pcap)} {extra_args} -Y {shlex.quote(display_filter)} -T fields -e {field}'
+    out = run_ok(cmd)
     if not out:
         return []
     c = Counter([x.strip() for x in out.splitlines() if x.strip()])
@@ -93,17 +86,14 @@ def top_counts(pcap: str, display_filter: str, field: str = "ip.dst", limit: int
 # ---------------- relay picking ----------------
 
 def pick_relays_from_media(media_peers: List[Tuple[str, int]]) -> List[Tuple[str, int]]:
-    """Prefer public IPs among UDP/8801 peers (Zoom media)."""
     return [(ip, n) for ip, n in media_peers if not is_private_ip(ip)]
 
 def pick_relays_from_quic(quic_peers: List[Tuple[str, int]]) -> List[Tuple[str, int]]:
-    """Fallback to public IPs among QUIC/443 peers."""
     return [(ip, n) for ip, n in quic_peers if not is_private_ip(ip)]
 
 # ---------------- location inference ----------------
 
 def _infer_from_rdns(ip: str, media_port: int) -> Optional[str]:
-    """Use UDP traceroute with rDNS to look for city codes near the destination."""
     if not have("traceroute"):
         return None
     out = run_ok(f"sudo traceroute -q 1 -U -p {media_port} {ip}", timeout=25)
@@ -115,18 +105,16 @@ def _infer_from_rdns(ip: str, media_port: int) -> Optional[str]:
         if not m:
             continue
         host = m.group(1).lower()
-        # skip lines where first token is just an IP
         if re.match(r"^\d+\.\d+\.\d+\.\d+$", host):
             continue
         names.append(host)
-    for host in names[-4:]:  # last few hops closest to the target
+    for host in names[-4:]:
         for key, city in CITY_HINTS.items():
             if key in host:
                 return city
     return None
 
 def _infer_from_rtt(ip: str, media_port: int) -> Optional[str]:
-    """Very rough RTT → region buckets (EU-centric numbers; tune as needed)."""
     if have("mtr"):
         out = run_ok(f"mtr -uz -P {media_port} -c 10 -r {ip}", timeout=25)
         if out:
@@ -166,10 +154,6 @@ def infer_location(ip: str, media_port: int = 8801) -> Optional[str]:
 # ---------------- enrichment ----------------
 
 def enrich_ip(ip: str) -> Dict[str, str]:
-    """
-    Calls local lookupip.py if present (same dir). That script can use ip-api.com or your DB.
-    Expected simple "Key: Value" lines (City/Region/Country/ISP/ASN...).
-    """
     here = os.path.dirname(os.path.abspath(__file__))
     script = os.path.join(here, "lookupip.py")
     if not os.path.isfile(script):
@@ -199,11 +183,11 @@ def main():
 
     print(pcap)
 
-    # 1) Counts
+    # 1) Counts with forced decode for Zoom port
     counts = {
-        "stun": tshark_count(pcap, "stun"),
-        "rtp":  tshark_count(pcap, "rtp"),
-        "rtcp": tshark_count(pcap, "rtcp"),
+        "stun": tshark_count(pcap, "stun", extra_args="-d udp.port==8801,stun"),
+        "rtp":  tshark_count(pcap, "rtp",  extra_args="-d udp.port==8801,rtp"),
+        "rtcp": tshark_count(pcap, "rtcp", extra_args="-d udp.port==8801,rtcp"),
         "quic": tshark_count(pcap, "quic && udp.port==443"),
     }
     print(f"Counts: STUN={counts['stun']}  RTP={counts['rtp']}  RTCP={counts['rtcp']}  QUIC443={counts['quic']}")
