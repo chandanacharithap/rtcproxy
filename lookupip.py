@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-lookupip.py — Enrich relay IP with rDNS hostname + city hint
+lookupip.py — Enrich relay IP with rDNS hostname + PoP detection
 """
 
-import sys, socket, json, requests
+import sys, socket, requests
 
 CITY_HINTS = {
+    # EU
     "ams": "Amsterdam", "fra": "Frankfurt", "lhr": "London",
     "cdg": "Paris", "mad": "Madrid", "waw": "Warsaw", "mil": "Milan",
     "vie": "Vienna", "bru": "Brussels", "cph": "Copenhagen",
     "arn": "Stockholm", "osl": "Oslo", "hel": "Helsinki",
     "zrh": "Zurich", "dub": "Dublin",
+    # US
     "sjc": "San Jose", "sfo": "San Francisco", "lax": "Los Angeles",
     "iad": "Ashburn", "dfw": "Dallas", "ord": "Chicago", "nyc": "New York",
 }
@@ -21,7 +23,7 @@ def reverse_dns(ip: str) -> str:
     except Exception:
         return ""
 
-def guess_city_from_rdns(hostname: str) -> str:
+def guess_pop_from_rdns(hostname: str) -> str:
     for key, city in CITY_HINTS.items():
         if key in hostname:
             return city
@@ -39,14 +41,14 @@ def geoip_fallback(ip: str) -> dict:
 def enrich(ip: str) -> dict:
     out = {"ip": ip}
 
-    # Try rDNS
+    # Try rDNS → PoP
     rdns = reverse_dns(ip)
     if rdns:
         out["rdns"] = rdns
-        city = guess_city_from_rdns(rdns)
-        if city:
-            out["city"] = city
-            return out  # stop here if PoP found
+        pop = guess_pop_from_rdns(rdns)
+        if pop:
+            out["pop"] = pop
+            return out  # strong signal: stop here
 
     # Fallback: GeoIP
     geo = geoip_fallback(ip)

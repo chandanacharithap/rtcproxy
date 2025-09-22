@@ -141,20 +141,19 @@ def main():
             info = enrich_ip(ip)
             parts = []
 
-            # Always show rDNS if present
             if "rdns" in info and info["rdns"]:
                 parts.append(f"rdns={info['rdns']}")
 
-            # City (from rDNS or GeoIP)
-            if "city" in info and info["city"]:
+            # Show PoP if found
+            if "pop" in info and info["pop"]:
+                parts.append(f"PoP={info['pop']}")
+            elif "city" in info and info["city"]:
                 parts.append(f"city={info['city']}")
 
-            # Other enrichments
             for k in ("region","country","asn","isp"):
                 if k in info and info[k]:
                     parts.append(f"{k}={info[k]}")
 
-            # Traceroute/RTT inference
             inferred = infer_location(ip,args.locate_port)
             if inferred and inferred != "location=unknown":
                 parts.append(f"inferred={inferred}")
