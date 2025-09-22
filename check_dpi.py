@@ -183,13 +183,19 @@ def main():
 
     print(pcap)
 
-    # 1) Counts with forced decode for Zoom port
-    counts = {
-        "stun": tshark_count(pcap, "stun", extra_args="-d udp.port==8801,stun"),
-        "rtp":  tshark_count(pcap, "rtp",  extra_args="-d udp.port==8801,rtp"),
-        "rtcp": tshark_count(pcap, "rtcp", extra_args="-d udp.port==8801,rtcp"),
-        "quic": tshark_count(pcap, "quic && udp.port==443"),
-    }
+        # 1) Counts with forced decode for Zoom port
+    stun = tshark_count(pcap, "stun", extra_args="-d udp.port==8801,stun")
+    rtp  = tshark_count(pcap, "rtp",  extra_args="-d udp.port==8801,rtp")
+    rtcp = tshark_count(pcap, "rtcp", extra_args="-d udp.port==8801,rtcp")
+    quic = tshark_count(pcap, "quic && udp.port==443")
+
+    # --- fallback: if stun/rtcp are 0, approximate by UDP heuristics ---
+    if stun == 0:
+        stun = tshark_count(pcap, "udp.port==8801")
+    if rtcp == 0:
+        rtcp = tshark_count(pcap, "udp.port==8801")
+
+    counts = {"stun": stun, "rtp": rtp, "rtcp": rtcp, "quic": quic}
     print(f"Counts: STUN={counts['stun']}  RTP={counts['rtp']}  RTCP={counts['rtcp']}  QUIC443={counts['quic']}")
 
     # 2) Top peers
