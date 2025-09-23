@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 lookupip.py — Enrich relay IP with GeoIP + rDNS hostname
-- Tries reverse DNS first (to catch PoP codes like ams/fra/lhr)
-- Falls back to ipinfo.io / ipapi.co JSON APIs
+
+Updates:
+- Prefer reverse DNS PoP codes (ams/fra/lhr/iad, etc.)
+- Consistent output fields: rdns, city, region, country, asn, isp
 """
 
 import sys, json, socket, urllib.request
@@ -37,20 +39,21 @@ def lookup(ip: str) -> dict:
     """Return best-effort info: rDNS, city, region, country, ASN/ISP."""
     result = {"ip": ip}
 
-    # Try reverse DNS first
+    # --- Step 1: Reverse DNS
     rdns = reverse_dns(ip)
     if rdns:
         result["rdns"] = rdns
         city = guess_city_from_rdns(rdns)
         if city:
             result["city"] = city
-            return result  # good enough (PoP identified)
+            return result  # ✅ short-circuit if PoP identified
 
-    # Try ipinfo.io
+    # --- Step 2: ipinfo.io
     try:
         d = _fetch(f"https://ipinfo.io/{ip}/json")
         if d and "ip" in d:
             result.update({
+                "rdns": rdns or None,
                 "city": d.get("city"),
                 "region": d.get("region"),
                 "country": d.get("country"),
@@ -61,10 +64,11 @@ def lookup(ip: str) -> dict:
     except Exception:
         pass
 
-    # Fallback: ipapi.co
+    # --- Step 3: ipapi.co fallback
     try:
         d = _fetch(f"https://ipapi.co/{ip}/json/")
         result.update({
+            "rdns": rdns or None,
             "city": d.get("city"),
             "region": d.get("region"),
             "country": d.get("country_name") or d.get("country"),
