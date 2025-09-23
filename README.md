@@ -1,7 +1,7 @@
 
-# 📘 Azure RTC Capture Setup Guide
+# 📘 Azure RTC Capture & WireGuard Setup Guide
 
-This guide explains how to deploy two Azure VMs (East US + West Europe), configure them for packet capture, and analyze Zoom/WebRTC relay IPs using `check_dpi.py`.
+This guide explains how to deploy two Azure VMs (East US + West Europe), configure them for packet capture, analyze Zoom/WebRTC relay IPs using `check_dpi.py`, and connect your phone to a VM via WireGuard.
 
 ---
 
@@ -10,25 +10,25 @@ This guide explains how to deploy two Azure VMs (East US + West Europe), configu
 1. Log in to the [Azure Portal](https://portal.azure.com).
 2. Create **two VMs** in the same resource group (e.g., `rtc-test`):
 
-   * **VM1**
+   * **VM1 (East US)**
 
      * Region: **East US (Zone 3)**
      * Size: `Standard D2s v3` (2 vCPUs, 8 GB RAM)
      * OS: **Ubuntu 22.04 LTS**
-     * Public IP: `20.55.35.218`
+     * Public IP: `20.55.35.218` [This is your VM1's IP]
 
-   * **VM2**
+   * **VM2 (West Europe)**
 
      * Region: **West Europe (Zone 2)**
      * Size: `Standard D2s v3` (2 vCPUs, 8 GB RAM)
      * OS: **Ubuntu 22.04 LTS**
-     * Public IP: `20.56.16.9`
+     * Public IP: `20.56.16.9` [This is your VM2's IP]
 
 ⚠️ Use **SSH key authentication**. Save your private key as `azure_rtc.pem`.
 
 ---
 
-## 2. Configure Networking Rules
+## 2. Configure Networking Rules (NSG)
 
 Each VM needs inbound rules in its **Network Security Group (NSG).**
 
@@ -40,9 +40,6 @@ Each VM needs inbound rules in its **Network Security Group (NSG).**
 | 300      | SSH       | 22      | TCP      | Any    | Any         | Allow  |
 | 310      | RDP-Allow | 3389    | TCP      | Any    | Any         | Allow  |
 | 320      | allow-tcp | 5000    | TCP      | Any    | Any         | Allow  |
-| 65000    | AllowVnet | Any     | Any      | VNet   | VNet        | Allow  |
-| 65001    | AllowLB   | Any     | Any      | ALB    | Any         | Allow  |
-| 65500    | DenyAllIn | Any     | Any      | Any    | Any         | Deny   |
 
 ### ✅ VM2 (West Europe)
 
@@ -53,11 +50,6 @@ Each VM needs inbound rules in its **Network Security Group (NSG).**
 | 121      | allow-turn-tcp           | 3478        | TCP      | Any    | Any         | Allow  |
 | 122      | allow-turn-relay-udp     | 49160–49200 | UDP      | Any    | Any         | Allow  |
 | 200      | allow-flask-5000-from-ip | 5000        | TCP      | Any    | Any         | Allow  |
-| 300      | SSH                      | 22          | TCP      | Any    | Any         | Allow  |
-| 310      | RDP-Allow                | 3389        | TCP      | Any    | Any         | Allow  |
-| 65000    | AllowVnet                | Any         | Any      | VNet   | VNet        | Allow  |
-| 65001    | AllowLB                  | Any         | Any      | ALB    | Any         | Allow  |
-| 65500    | DenyAllIn                | Any         | Any      | Any    | Any         | Deny   |
 
 ---
 
@@ -141,20 +133,98 @@ Invoke-WebRequest -Uri "http://<VM_PUBLIC_IP>:5000/download?file=/var/log/rtc/<p
 ```
 
 ---
+---
 
-## 8. Latency Notes
+# 📱 Connect Phone to VM via WireGuard (QR Setup)
 
-* **VM1 (East US)** ↔ **VM2 (West Europe)** traffic crosses the Atlantic.
-* Expected RTT: **140–250 ms**, matches your observed \~256 ms.
-* If both VMs are in the **same region**, RTT drops to **20–40 ms**.
+## 1. Install WireGuard on the VM
 
-| VM Placement              | Expected RTT |
-| ------------------------- | ------------ |
-| East US ↔ East US         | 20–40 ms     |
-| West Europe ↔ West Europe | 20–40 ms     |
-| East US ↔ West Europe     | 140–250 ms   |
+```bash
+ssh -i ~/azure_rtc.pem azureuser@<VM_PUBLIC_IP>
+sudo apt update
+sudo apt install -y wireguard qrencode
+```
 
 ---
 
-✅ With this setup, you can reliably capture Zoom/WebRTC traffic, download `.pcap` files, and analyze relay IPs and latency.
+## 2. Generate Server Keys
+
+```bash
+umask 077
+wg genkey | tee server_private.key | wg pubkey > server_public.key
+```
+
+---
+
+## 3. Configure WireGuard Server
+
+```bash
+sudo nano /etc/wireguard/wg0.conf
+```
+
+Paste this (replace `<SERVER_PRIVATE_KEY>` and `<VM_PUBLIC_IP>`):
+
+```ini
+[Interface]
+PrivateKey = <SERVER_PRIVATE_KEY>
+Address = 10.8.0.1/24
+ListenPort = 51820
+
+# Phone peer
+[Peer]
+PublicKey = <PHONE_PUBLIC_KEY>
+AllowedIPs = 10.8.0.2/32
+```
+
+---
+
+## 4. Generate Phone (Client) Config
+
+```bash
+wg genkey | tee phone_private.key | wg pubkey > phone_public.key
+```
+
+Create `phone.conf`:
+
+```ini
+[Interface]
+PrivateKey = <PHONE_PRIVATE_KEY>
+Address = 10.8.0.2/24
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = <SERVER_PUBLIC_KEY>
+Endpoint = <VM_PUBLIC_IP>:51820
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+```
+
+---
+
+## 5. Show QR Code for Phone
+
+```bash
+qrencode -t ansiutf8 < phone.conf
+```
+
+👉 Open WireGuard app on your phone → **Add Tunnel** → **Scan QR code**.
+
+---
+
+## 6. Start WireGuard
+
+```bash
+sudo systemctl enable wg-quick@wg0
+sudo systemctl start wg-quick@wg0
+```
+
+Check:
+
+```bash
+sudo wg
+```
+
+On your phone, activate the tunnel.
+
+
 
