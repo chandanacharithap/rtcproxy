@@ -347,7 +347,7 @@ def detect_rtcp(packet_data):
         "payload": payload.hex(),
     }
 
-from lookupip import lookup_ip  
+from lookupip import lookup
 
 def validate_rtp_info_list(message_info_list, packet_count):
     relay_ips = Counter()
@@ -360,7 +360,7 @@ def validate_rtp_info_list(message_info_list, packet_count):
     print("Relay IPs (from RTP flows):")
     for ip, count in relay_ips.most_common():
         try:
-            info = lookup_ip(ip)  # expects dict like {"city":..., "region":..., "country":..., "asn":..., "isp":...}
+            info = lookup(ip)  # expects dict like {"city":..., "region":..., "country":..., "asn":..., "isp":...}
             city = info.get("city", "?")
             region = info.get("region", "?")
             country = info.get("country", "?")
