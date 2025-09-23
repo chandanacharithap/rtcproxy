@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-lookupip.py — Enrich relay IP with PoP detection priority.
-- Prefer rDNS with city code (ams, fra, lhr, etc.)
-- Fall back to traceroute rDNS hints
-- Last resort: GeoIP database
+lookupip.py — Enrich relay IP with GeoIP + rDNS hostname
+- Tries reverse DNS first (to catch PoP codes like ams/fra/lhr)
+- Falls back to ipinfo.io / ipapi.co JSON APIs
 """
 
-import sys, socket, re, requests, subprocess, shlex
+import sys, json, socket, urllib.request
 
 CITY_HINTS = {
     "ams": "Amsterdam", "fra": "Frankfurt", "lhr": "London",
@@ -17,6 +16,10 @@ CITY_HINTS = {
     "sjc": "San Jose", "sfo": "San Francisco", "lax": "Los Angeles",
     "iad": "Ashburn", "dfw": "Dallas", "ord": "Chicago", "nyc": "New York",
 }
+
+def _fetch(url):
+    with urllib.request.urlopen(url, timeout=8) as resp:
+        return json.loads(resp.read().decode())
 
 def reverse_dns(ip: str) -> str:
     try:
@@ -30,72 +33,58 @@ def guess_city_from_rdns(hostname: str) -> str:
             return city
     return ""
 
-def traceroute_guess(ip: str, port: int = 8801) -> str:
-    try:
-        out = subprocess.run(
-            shlex.split(f"traceroute -q1 -U -p {port} {ip}"),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20
-        )
-        lines = out.stdout.decode(errors="ignore").splitlines()
-        for line in lines[-4:]:  # last hops
-            m = re.search(r"\s+\d+\s+([^\s(]+)", line)
-            if not m:
-                continue
-            host = m.group(1).lower()
-            for key, city in CITY_HINTS.items():
-                if key in host:
-                    return city
-    except Exception:
-        pass
-    return ""
+def lookup(ip: str) -> dict:
+    """Return best-effort info: rDNS, city, region, country, ASN/ISP."""
+    result = {"ip": ip}
 
-def geoip_fallback(ip: str) -> dict:
-    try:
-        r = requests.get(f"https://ipinfo.io/{ip}/json", timeout=5)
-        if r.status_code == 200:
-            return r.json()
-    except Exception:
-        pass
-    return {}
-
-def enrich(ip: str) -> dict:
-    out = {"ip": ip}
-
-    # Step 1: reverse DNS check
+    # Try reverse DNS first
     rdns = reverse_dns(ip)
     if rdns:
-        out["rdns"] = rdns
+        result["rdns"] = rdns
         city = guess_city_from_rdns(rdns)
         if city:
-            out["pop"] = city
-            return out  # PoP detected, highest priority
+            result["city"] = city
+            return result  # good enough (PoP identified)
 
-    # Step 2: traceroute last hops
-    tr_city = traceroute_guess(ip)
-    if tr_city:
-        out["pop"] = tr_city
-        return out
+    # Try ipinfo.io
+    try:
+        d = _fetch(f"https://ipinfo.io/{ip}/json")
+        if d and "ip" in d:
+            result.update({
+                "city": d.get("city"),
+                "region": d.get("region"),
+                "country": d.get("country"),
+                "asn": d.get("org").split()[0] if d.get("org") else None,
+                "isp": d.get("org"),
+            })
+            return result
+    except Exception:
+        pass
 
-    # Step 3: fallback GeoIP
-    geo = geoip_fallback(ip)
-    if geo:
-        out.update({
-            "city": geo.get("city", ""),
-            "region": geo.get("region", ""),
-            "country": geo.get("country", ""),
-            "org": geo.get("org", "")
+    # Fallback: ipapi.co
+    try:
+        d = _fetch(f"https://ipapi.co/{ip}/json/")
+        result.update({
+            "city": d.get("city"),
+            "region": d.get("region"),
+            "country": d.get("country_name") or d.get("country"),
+            "asn": d.get("asn"),
+            "isp": d.get("org"),
         })
-    return out
+    except Exception:
+        pass
+
+    return result
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: lookupip.py <IP>")
+    if len(sys.argv) < 2:
+        print("Usage: lookupip.py <IP> [<IP> ...]")
         sys.exit(1)
-
-    ip = sys.argv[1]
-    info = enrich(ip)
-    for k,v in info.items():
-        print(f"{k}: {v}")
+    for ip in sys.argv[1:]:
+        info = lookup(ip)
+        for k, v in info.items():
+            if v:
+                print(f"{k}: {v}")
 
 if __name__ == "__main__":
     main()
