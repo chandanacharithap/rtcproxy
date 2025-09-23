@@ -6,8 +6,10 @@ app = Flask(__name__)
 # ====== Config ======
 CAP_DIR = "/var/log/rtc"
 STATE_FILE = "/tmp/rtc_capture.json"
-DEFAULT_IFACE = os.environ.get("RTC_IFACE", "wg0")
-DEFAULT_PEER_IP = os.environ.get("RTC_PEER_IP", "10.0.0.3")   
+# DEFAULT_IFACE = os.environ.get("RTC_IFACE", "wg0")
+# DEFAULT_PEER_IP = os.environ.get("RTC_PEER_IP", "10.0.0.3")   
+DEFAULT_IFACE = os.environ.get("RTC_IFACE", "eth0")  # capture on public NIC by default
+DEFAULT_PEER_IP = os.environ.get("RTC_PEER_IP", "0.0.0.0")  # disable peer filter by default
 API_PORT = int(os.environ.get("RTC_API_PORT", "5000"))
 API_BIND = os.environ.get("RTC_API_BIND", "0.0.0.0")
 API_KEY  = os.environ.get("RTC_API_KEY", "")  
@@ -49,7 +51,7 @@ def start_capture():
     peer   = request.args.get("peer", DEFAULT_PEER_IP)
     flt    = request.args.get("filter")
    
-    bpf    = flt if flt else f"host {peer} and (udp or tcp) and not port 51820"
+    bpf = flt if flt else "udp and not port 22 and not port 5000 and not port 51820"
 
     fname = os.path.join(CAP_DIR, f"rtc-{nowstamp()}.pcap")
     cmd = ["tcpdump", "-U", "-i", iface, "-w", fname, bpf]
