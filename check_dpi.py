@@ -348,43 +348,24 @@ def detect_rtcp(packet_data):
     }
 
 def validate_rtp_info_list(message_info_list, packet_count):
-    filtered_message_info_list = []
-    flow_dict = defaultdict(list)
+    flow_counts = Counter()
 
-    global ssrc_set
-
-    # Group by flow + payload_type
     for msg in message_info_list:
         flow_id = (
-            msg["flow_info"]["src_ip"], msg["flow_info"]["dst_ip"],
-            msg["flow_info"]["src_port"], msg["flow_info"]["dst_port"],
-            msg["ssrc"], msg["payload_type"]
+            msg["flow_info"]["src_ip"],
+            msg["flow_info"]["dst_ip"],
+            msg["flow_info"]["src_port"],
+            msg["flow_info"]["dst_port"],
+            msg["payload_type"]
         )
-        msg["processed"] = False
-        flow_dict[flow_id].append(msg)
+        flow_counts[flow_id] += 1
 
-    # … (same clustering logic you already have) …
+    print("RTP Flows:")
+    for flow_id, count in flow_counts.items():
+        print(f"Flow {flow_id[0]}:{flow_id[2]} -> {flow_id[1]}:{flow_id[3]} PT={flow_id[4]}: {count} packets")
 
-    if 1:
-        print("RTP Flows:")
-        debug_flow_group = defaultdict(list)
-        for pkt in filtered_message_info_list:
-            flow_id = (
-                pkt["flow_info"]["src_ip"], pkt["flow_info"]["dst_ip"],
-                pkt["flow_info"]["src_port"], pkt["flow_info"]["dst_port"],
-                pkt["ssrc"], pkt["payload_type"]
-            )
-            debug_flow_group[flow_id].append(pkt)
+    return message_info_list
 
-        # 🚨 Only print the flow summary, not individual packets
-        for flow_id, messages in debug_flow_group.items():
-            print(f"Flow {flow_id[0]}:{flow_id[2]} -> {flow_id[1]}:{flow_id[3]} "
-                  f"PT={flow_id[5]}: {len(messages)} packets")
-
-    ssrc_set = set(pkt["ssrc"] for pkt in filtered_message_info_list)
-    ssrc_set.add(0)
-
-    return filtered_message_info_list
 
 # def validate_rtp_info_list(message_info_list, packet_count):
 #     filtered_message_info_list = []
