@@ -347,26 +347,31 @@ def detect_rtcp(packet_data):
         "payload": payload.hex(),
     }
 
+from lookupip import lookup_ip  
+
 def validate_rtp_info_list(message_info_list, packet_count):
-    flow_counts = Counter()
     relay_ips = Counter()
 
+    # Collect destination IPs from RTP packets
     for msg in message_info_list:
-        flow_id = (
-            msg["flow_info"]["src_ip"],
-            msg["flow_info"]["dst_ip"],
-            msg["flow_info"]["src_port"],
-            msg["flow_info"]["dst_port"],
-            msg["payload_type"]
-        )
-        flow_counts[flow_id] += 1
-        relay_ips[msg["flow_info"]["dst_ip"]] += 1  # just collect destination IPs
+        dst_ip = msg["flow_info"]["dst_ip"]
+        relay_ips[dst_ip] += 1
 
     print("Relay IPs (from RTP flows):")
     for ip, count in relay_ips.most_common():
-        print(f"{ip}\tpackets={count}")
+        try:
+            info = lookup_ip(ip)  # expects dict like {"city":..., "region":..., "country":..., "asn":..., "isp":...}
+            city = info.get("city", "?")
+            region = info.get("region", "?")
+            country = info.get("country", "?")
+            asn = info.get("asn", "?")
+            isp = info.get("isp", "?")
+            print(f"{ip}\tpackets={count} | city={city} | region={region} | country={country} | asn={asn} | isp={isp}")
+        except Exception as e:
+            print(f"{ip}\tpackets={count} | lookup failed: {e}")
 
     return message_info_list
+
 
 
 
