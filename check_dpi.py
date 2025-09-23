@@ -349,6 +349,7 @@ def detect_rtcp(packet_data):
 
 def validate_rtp_info_list(message_info_list, packet_count):
     flow_counts = Counter()
+    relay_ips = Counter()
 
     for msg in message_info_list:
         flow_id = (
@@ -359,12 +360,14 @@ def validate_rtp_info_list(message_info_list, packet_count):
             msg["payload_type"]
         )
         flow_counts[flow_id] += 1
+        relay_ips[msg["flow_info"]["dst_ip"]] += 1  # just collect destination IPs
 
-    print("RTP Flows:")
-    for flow_id, count in flow_counts.items():
-        print(f"Flow {flow_id[0]}:{flow_id[2]} -> {flow_id[1]}:{flow_id[3]} PT={flow_id[4]}: {count} packets")
+    print("Relay IPs (from RTP flows):")
+    for ip, count in relay_ips.most_common():
+        print(f"{ip}\tpackets={count}")
 
     return message_info_list
+
 
 
 # def validate_rtp_info_list(message_info_list, packet_count):
