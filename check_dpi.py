@@ -766,93 +766,33 @@ def load_config(config_path="config.json"):
 
 
 if __name__ == "__main__":
-    # python check_dpi.py --config ../config.json --multiprocess
-    
-    # if len(sys.argv) < 2:
-    #     print("Usage: python script.py <folder_path> or <file_path>")
-    #     sys.exit(1)
-
-    # path = sys.argv[1]
-    # if path.endswith(".pcap") or path.endswith(".pcapng"):
-    #     process_pcap_file(path)
-    # else:
-    #     process_pcap_folder(path)
-
-    parser = argparse.ArgumentParser(description="Filter out background traffic from pcap files.")
-    parser.add_argument("--multiprocess", action="store_true", help="Use multiprocessing for extraction.")
-    parser.add_argument("--config", type=str, default="config.json", help="Path to the configuration file.")
+    parser = argparse.ArgumentParser(description="RTP/RTC packet analyzer")
+    parser.add_argument("--pcap", type=str, help="Path to a single pcap/pcapng file")
+    parser.add_argument("--multiprocess", action="store_true", help="Use multiprocessing for batch mode")
+    parser.add_argument("--config", type=str, default=None, help="Path to the configuration file")
     args = parser.parse_args()
-    config_path = args.config
-    multiprocess = args.multiprocess
-    pcap_main_folder, save_main_folder, apps, tests, rounds, client_types, precall_noise, postcall_noise, plugin_target_folder, plugin_source_folder = load_config(config_path)
 
-    for app_name in apps:
-        for test_name in tests:
-            tasks = []
-            task_names = []
-            if "noise" in test_name:
-                continue
-            for test_round in rounds:
-                for client_type in client_types:
-                    for i in range(1, tests[test_name] + 1):
-                        pcap_subfolder = f"{pcap_main_folder}/{app_name}"
-                        pcap_file_name = f"{app_name}_{test_name}_{test_round}_{client_type}.pcapng"
-                        pcap_file = f"{pcap_subfolder}/{pcap_file_name}"
-                        tasks.append((pcap_file,))
-                        task_names.append(f"{app_name}_{test_name}_{test_round}_{client_type}")
+    if args.pcap:
+        # Direct single-file mode (Peiqing style)
+        protocol = "rtp"
+        read_pcapng(args.pcap)
+    elif args.config:
+        # Existing batch/config mode
+        config_path = args.config
+        multiprocess = args.multiprocess
+        pcap_main_folder, save_main_folder, apps, tests, rounds, client_types, \
+            precall_noise, postcall_noise, plugin_target_folder, plugin_source_folder = load_config(config_path)
 
-            processes = []
-            process_start_times = []
-            for i, task_args in enumerate(tasks):
-                if multiprocess:
-                    p = multiprocessing.Process(target=process_pcap_file, args=task_args)
-                    process_start_times.append(time.time())
-                    processes.append(p)
-                    p.start()
-                else:
-                    print(f"Processing {task_args}")
-                    process_pcap_file(*task_args)
-
-            if multiprocess:
-                if len(processes) == 0:
-                    print(f"Skip {app_name} tasks.")
+        for app_name in apps:
+            for test_name in tests:
+                if "noise" in test_name:
                     continue
-
-                print(f"\n{app_name} tasks started.\n")
-
-                lines = len(processes)
-                elapsed_times = [0] * len(processes)
-                print("\n" * lines, end="")
-                while True:
-                    all_finished = True
-                    status = ""
-                    for i, p in enumerate(processes):
-                        if p.is_alive():
-                            elapsed_time = int(time.time() - process_start_times[i])
-                            elapsed_times[i] = elapsed_time
-                            all_finished = False
-                            status += f"Running\t|{elapsed_time}s\t|{task_names[i]}\n"
-                        else:
-                            elapsed_time = elapsed_times[i]
-                            if p.exitcode is None:
-                                status += f"Unknown\t|{elapsed_time}s\t|{task_names[i]}\n"
-                            elif p.exitcode == 0:
-                                status += f"Done\t|{elapsed_time}s\t|{task_names[i]}\n"
-                            else:
-                                status += f"Code {p.exitcode}\t|{elapsed_time}s\t|{task_names[i]}\n"
-
-                    if status[-1] == "\n":
-                        status = status[:-1]
-                    print("\033[F" * lines, end="")  # Move cursor up
-                    for _ in range(lines):
-                        print("\033[K\n", end="")  # Clear the line
-                    print("\033[F" * lines, end="")  # Move cursor up
-                    print(status)
-
-                    if all_finished:
-                        print(f"\nAll {app_name} tasks are finished. (Average Runtime: {sum(elapsed_times) / len(elapsed_times):.2f}s)")
-                        break
-                    time.sleep(1)
-
-                for p in processes:
-                    p.join()
+                for test_round in rounds:
+                    for client_type in client_types:
+                        for i in range(1, tests[test_name] + 1):
+                            pcap_subfolder = f"{pcap_main_folder}/{app_name}"
+                            pcap_file_name = f"{app_name}_{test_name}_{test_round}_{client_type}.pcapng"
+                            pcap_file = f"{pcap_subfolder}/{pcap_file_name}"
+                            process_pcap_file(pcap_file)
+    else:
+        parser.print_help()
