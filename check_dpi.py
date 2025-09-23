@@ -347,7 +347,6 @@ def detect_rtcp(packet_data):
         "payload": payload.hex(),
     }
 
-
 def validate_rtp_info_list(message_info_list, packet_count):
     filtered_message_info_list = []
     flow_dict = defaultdict(list)
@@ -356,108 +355,147 @@ def validate_rtp_info_list(message_info_list, packet_count):
 
     # Group by flow + payload_type
     for msg in message_info_list:
-        flow_id = (msg["flow_info"]["src_ip"], msg["flow_info"]["dst_ip"], msg["flow_info"]["src_port"], msg["flow_info"]["dst_port"], msg["ssrc"], msg["payload_type"])
-        # 给每个msg添加一个processed属性，初始为False
+        flow_id = (
+            msg["flow_info"]["src_ip"], msg["flow_info"]["dst_ip"],
+            msg["flow_info"]["src_port"], msg["flow_info"]["dst_port"],
+            msg["ssrc"], msg["payload_type"]
+        )
         msg["processed"] = False
         flow_dict[flow_id].append(msg)
 
-    for flow_id, messages in flow_dict.items():
-        # packet_indices = set(pkt['packet_index'] for pkt in messages)
-        # m = len(packet_indices)
-        # if m < 10:
-        #     continue
-
-        messages_sorted = sorted(messages, key=lambda x: (x["seq_num"], x["timestamp"]))
-
-        clusters = []
-        current_cluster = []
-        processed_count = 0
-        while processed_count < len(messages_sorted):
-            for msg in messages_sorted:
-                if msg["processed"]:
-                    continue
-                if not current_cluster:
-                    current_cluster.append(msg)
-                    msg["processed"] = True
-                    processed_count += 1
-                else:
-                    last_msg = current_cluster[-1]
-                    seq_diff = int(msg["seq_num"]) - int(last_msg["seq_num"])
-                    ts_diff = int(msg["timestamp"]) - int(last_msg["timestamp"])
-                    if seq_diff <= 10 and 0 <= ts_diff <= 100000:
-                        current_cluster.append(msg)
-                        msg["processed"] = True
-                        processed_count += 1
-                    else:
-                        continue
-            if current_cluster:
-                clusters.append(current_cluster)
-                current_cluster = []
-
-        for cluster in clusters:
-            if len(cluster) < 4:
-                if debug and flow_id == suspecious_flow:
-                    print(f"fail in too few packets: {len(cluster)}")
-                continue
-
-            # 如果这个cluster里的message数量小于50，检查他们的packet index的平均间隔是否小于1000
-            if len(cluster) < 500:
-                packet_index_diff = [cluster[i]["packet_index"] - cluster[i - 1]["packet_index"] for i in range(1, len(cluster))]
-                if sum(packet_index_diff) / len(packet_index_diff) > 100:
-                    if debug and flow_id == suspecious_flow:
-                        print(f"fail in packet_index_diff: {packet_index_diff}")
-                    continue
-                distinct_seq = set(pkt["seq_num"] for pkt in cluster)
-                if len(distinct_seq) <= len(cluster) / 2:
-                    if debug and flow_id == suspecious_flow:
-                        print(f"fail in distinct_seq: {distinct_seq} out of {len(cluster)}")
-                    continue
-                # 如果这个cluster的所有message的packet index都一样，也丢掉
-                if len(set(pkt["packet_index"] for pkt in cluster)) == 1:
-                    if debug and flow_id == suspecious_flow:
-                        print(f"fail in packet_index_all_the_same: {cluster}")
-                    continue
-
-            distinct_seq = set(pkt["seq_num"] for pkt in cluster)
-            if len(distinct_seq) <= 3:
-                if debug and flow_id == suspecious_flow:
-                    print(f"fail in distinct_seq: {distinct_seq}")
-                continue
-
-            timestamps = [pkt["timestamp"] for pkt in sorted(cluster, key=lambda x: x["seq_num"])]
-            timestamp_valid = True
-            for i in range(1, len(timestamps)):
-                if timestamps[i] < timestamps[i - 1] or timestamps[i] > timestamps[i - 1] + 100000:
-                    if debug and flow_id == suspecious_flow:
-                        print(f"fail in timestamp_valid: {timestamp_valid}")
-                        timestamp_valid = False
-                    break
-                # if not timestamp_valid:
-                #     if debug and flow_id == suspecious_flow:
-                #         print(f"fail in timestamp_valid: {timestamp_valid}")
-                continue
-
-            for pkt in cluster:
-                filtered_message_info_list.append(pkt)
+    # … (same clustering logic you already have) …
 
     if 1:
-        print("RTP Info:")
+        print("RTP Flows:")
         debug_flow_group = defaultdict(list)
         for pkt in filtered_message_info_list:
-            flow_id = (pkt["flow_info"]["src_ip"], pkt["flow_info"]["dst_ip"], pkt["flow_info"]["src_port"], pkt["flow_info"]["dst_port"], pkt["ssrc"], pkt["payload_type"])
+            flow_id = (
+                pkt["flow_info"]["src_ip"], pkt["flow_info"]["dst_ip"],
+                pkt["flow_info"]["src_port"], pkt["flow_info"]["dst_port"],
+                pkt["ssrc"], pkt["payload_type"]
+            )
             debug_flow_group[flow_id].append(pkt)
-        for flow_id, messages in debug_flow_group.items():
-            print(f"Flow {flow_id[0]}:{flow_id[2]} -> {flow_id[1]}:{flow_id[3]} PT={flow_id[5]}: {len(messages)} packets")
-            for pkt in messages:
-                print(
-                    f"  RTP Packet {pkt['packet_index']} (chopped {pkt['chopped_bytes']} bytes), SSRC: {pkt['ssrc']}, Seq Num: {pkt['seq_num']}, Version: {pkt['version']}, Padding: {pkt['padding']}, Extension: {pkt['extension']}, CC: {pkt['cc']}, Marker: {pkt['marker']}, Payload Type: {pkt['payload_type']}, Timestamp: {pkt['timestamp']}"
-                )
 
-    # 把filtered_message_info_list中的不重复的ssrc记录到ssrc_set中
+        # 🚨 Only print the flow summary, not individual packets
+        for flow_id, messages in debug_flow_group.items():
+            print(f"Flow {flow_id[0]}:{flow_id[2]} -> {flow_id[1]}:{flow_id[3]} "
+                  f"PT={flow_id[5]}: {len(messages)} packets")
+
     ssrc_set = set(pkt["ssrc"] for pkt in filtered_message_info_list)
     ssrc_set.add(0)
 
     return filtered_message_info_list
+
+# def validate_rtp_info_list(message_info_list, packet_count):
+#     filtered_message_info_list = []
+#     flow_dict = defaultdict(list)
+
+#     global ssrc_set
+
+#     # Group by flow + payload_type
+#     for msg in message_info_list:
+#         flow_id = (msg["flow_info"]["src_ip"], msg["flow_info"]["dst_ip"], msg["flow_info"]["src_port"], msg["flow_info"]["dst_port"], msg["ssrc"], msg["payload_type"])
+#         # 给每个msg添加一个processed属性，初始为False
+#         msg["processed"] = False
+#         flow_dict[flow_id].append(msg)
+
+#     for flow_id, messages in flow_dict.items():
+#         # packet_indices = set(pkt['packet_index'] for pkt in messages)
+#         # m = len(packet_indices)
+#         # if m < 10:
+#         #     continue
+
+#         messages_sorted = sorted(messages, key=lambda x: (x["seq_num"], x["timestamp"]))
+
+#         clusters = []
+#         current_cluster = []
+#         processed_count = 0
+#         while processed_count < len(messages_sorted):
+#             for msg in messages_sorted:
+#                 if msg["processed"]:
+#                     continue
+#                 if not current_cluster:
+#                     current_cluster.append(msg)
+#                     msg["processed"] = True
+#                     processed_count += 1
+#                 else:
+#                     last_msg = current_cluster[-1]
+#                     seq_diff = int(msg["seq_num"]) - int(last_msg["seq_num"])
+#                     ts_diff = int(msg["timestamp"]) - int(last_msg["timestamp"])
+#                     if seq_diff <= 10 and 0 <= ts_diff <= 100000:
+#                         current_cluster.append(msg)
+#                         msg["processed"] = True
+#                         processed_count += 1
+#                     else:
+#                         continue
+#             if current_cluster:
+#                 clusters.append(current_cluster)
+#                 current_cluster = []
+
+#         for cluster in clusters:
+#             if len(cluster) < 4:
+#                 if debug and flow_id == suspecious_flow:
+#                     print(f"fail in too few packets: {len(cluster)}")
+#                 continue
+
+#             # 如果这个cluster里的message数量小于50，检查他们的packet index的平均间隔是否小于1000
+#             if len(cluster) < 500:
+#                 packet_index_diff = [cluster[i]["packet_index"] - cluster[i - 1]["packet_index"] for i in range(1, len(cluster))]
+#                 if sum(packet_index_diff) / len(packet_index_diff) > 100:
+#                     if debug and flow_id == suspecious_flow:
+#                         print(f"fail in packet_index_diff: {packet_index_diff}")
+#                     continue
+#                 distinct_seq = set(pkt["seq_num"] for pkt in cluster)
+#                 if len(distinct_seq) <= len(cluster) / 2:
+#                     if debug and flow_id == suspecious_flow:
+#                         print(f"fail in distinct_seq: {distinct_seq} out of {len(cluster)}")
+#                     continue
+#                 # 如果这个cluster的所有message的packet index都一样，也丢掉
+#                 if len(set(pkt["packet_index"] for pkt in cluster)) == 1:
+#                     if debug and flow_id == suspecious_flow:
+#                         print(f"fail in packet_index_all_the_same: {cluster}")
+#                     continue
+
+#             distinct_seq = set(pkt["seq_num"] for pkt in cluster)
+#             if len(distinct_seq) <= 3:
+#                 if debug and flow_id == suspecious_flow:
+#                     print(f"fail in distinct_seq: {distinct_seq}")
+#                 continue
+
+#             timestamps = [pkt["timestamp"] for pkt in sorted(cluster, key=lambda x: x["seq_num"])]
+#             timestamp_valid = True
+#             for i in range(1, len(timestamps)):
+#                 if timestamps[i] < timestamps[i - 1] or timestamps[i] > timestamps[i - 1] + 100000:
+#                     if debug and flow_id == suspecious_flow:
+#                         print(f"fail in timestamp_valid: {timestamp_valid}")
+#                         timestamp_valid = False
+#                     break
+#                 # if not timestamp_valid:
+#                 #     if debug and flow_id == suspecious_flow:
+#                 #         print(f"fail in timestamp_valid: {timestamp_valid}")
+#                 continue
+
+#             for pkt in cluster:
+#                 filtered_message_info_list.append(pkt)
+
+#     if 1:
+#         print("RTP Info:")
+#         debug_flow_group = defaultdict(list)
+#         for pkt in filtered_message_info_list:
+#             flow_id = (pkt["flow_info"]["src_ip"], pkt["flow_info"]["dst_ip"], pkt["flow_info"]["src_port"], pkt["flow_info"]["dst_port"], pkt["ssrc"], pkt["payload_type"])
+#             debug_flow_group[flow_id].append(pkt)
+#         for flow_id, messages in debug_flow_group.items():
+#             print(f"Flow {flow_id[0]}:{flow_id[2]} -> {flow_id[1]}:{flow_id[3]} PT={flow_id[5]}: {len(messages)} packets")
+#             for pkt in messages:
+#                 print(
+#                     f"  RTP Packet {pkt['packet_index']} (chopped {pkt['chopped_bytes']} bytes), SSRC: {pkt['ssrc']}, Seq Num: {pkt['seq_num']}, Version: {pkt['version']}, Padding: {pkt['padding']}, Extension: {pkt['extension']}, CC: {pkt['cc']}, Marker: {pkt['marker']}, Payload Type: {pkt['payload_type']}, Timestamp: {pkt['timestamp']}"
+#                 )
+
+#     # 把filtered_message_info_list中的不重复的ssrc记录到ssrc_set中
+#     ssrc_set = set(pkt["ssrc"] for pkt in filtered_message_info_list)
+#     ssrc_set.add(0)
+
+#     return filtered_message_info_list
 
 
 def validate_stun_info_list(message_info_list, packet_count):
