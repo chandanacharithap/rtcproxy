@@ -74,18 +74,27 @@ def stop_capture():
     if not require_key():
         return ("unauthorized\n", 401)
     st = read_state()
+
     if not st.get("running"):
         return ("not running\n", 200)
 
     pid = st.get("pid")
+    if not pid:
+        st["running"] = False
+        st["stopped_at"] = int(time.time())
+        write_state(st)
+        return ("no active process found\n", 200)
+
     try:
         os.killpg(int(pid), signal.SIGTERM)
     except ProcessLookupError:
         pass
+
     st["running"] = False
     st["stopped_at"] = int(time.time())
     write_state(st)
     return (f"stopped pid={pid} file={st.get('file')}\n", 200)
+
 
 @app.route("/download", methods=["GET"])
 def download():
