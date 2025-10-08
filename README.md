@@ -238,6 +238,9 @@ Captured files stored in: C:\Users\chand\captures\us-east-europe-west-run_59
 * If output has `?`, fallback API lookup fills missing fields.
 * **Service Map** in script maps ASNs/ISPs to known apps.
 
+* **For business accounts**, we have set up 2 accounts for Zoom, Google Meet, and Microsoft Teams. See login instructions [here](https://docs.google.com/spreadsheets/d/1mPv7KNgY9s4xKgqWKOYSE27-RdRJQZg1zn9V6VfSwWg/edit?gid=0#gid=0). The accounts are paid monthly.
+
+
 ---
 
 Place your Azure private key (azure_rtc.pem) in C:\Users\chand\.ssh\ and ensure the captures folder exists at C:\Users\chand\captures.
