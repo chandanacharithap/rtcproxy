@@ -1,248 +1,270 @@
-RTC Relay Measurement Setup & Usage
+# 🛰️ RTC Relay Measurement Setup & Usage (Azure + WireGuard + Capture Controller)
 
-This guide explains how to set up two fresh Azure VMs (VM1 and VM2), configure them for RTC capture, and run the relay detection scripts.
-It covers **VM cloning, repo setup, API service, WireGuard, capture/analysis steps, and interpreting results.**
-
----
-
-## 1️⃣ VM Setup & Cloning
-
-1. **Create two Azure Ubuntu VMs** (e.g., `us-east` and `europe-west` regions).
-
-   * Minimum: 2 vCPUs, 4 GB RAM.
-   * OS: Ubuntu 20.04+.
-
-2. Generate or reuse your SSH keypair:
-
-   ```bash
-   ssh-keygen -t rsa -b 4096 -f ~/.ssh/azure_rtc
-   ```
-
-   Add the **public key** to both VMs.
-
-3. Verify connectivity:
-
-   ```bash
-   ssh -i ~/.ssh/azure_rtc azureuser@<VM_IP>
-   ```
+This guide walks you through setting up **two Azure Ubuntu VMs**, configuring the **RTC capture service**, linking **phones via WireGuard VPN**, and running automated captures via the PowerShell controller script (`rtc_capture.ps1`).
+It supports **relay IP detection**, **ASN/CIDR blocking**, and **geolocation lookup via ipinfo.io**.
 
 ---
 
-## 2️⃣ Install Dependencies on Each VM
+## 🧩 1️⃣ VM Setup in Azure Portal
 
-Run the following **once on each VM**:
+### **Create 2 Ubuntu VMs**
+
+* Region examples: `West Europe` and `Southeast Asia`
+* **Size:** 2 vCPUs, 4 GB RAM (Standard_B2s works fine)
+* **Image:** Ubuntu Server 20.04 LTS or 22.04 LTS
+* **Authentication:** SSH key (generate or reuse one)
+
+  ```bash
+  ssh-keygen -t rsa -b 4096 -f ~/.ssh/azure_rtc
+  ```
+* Copy the **public key** to both VMs during creation.
+
+---
+
+### **Networking Configuration (via Azure Portal)**
+
+Go to each VM → **Networking → Add inbound port rules:**
+
+| Purpose         | Port  | Protocol | Source | Action |
+| --------------- | ----- | -------- | ------ | ------ |
+| RTC Capture API | 5000  | TCP      | My IP  | Allow  |
+| WireGuard VPN   | 51820 | UDP      | Any    | Allow  |
+| SSH Access      | 22    | TCP      | My IP  | Allow  |
+
+> ✅ This enables the capture API, VPN tunnel, and remote control access.
+
+---
+
+## ⚙️ 2️⃣ Install Dependencies on Each VM
+
+Connect via SSH:
+
+```bash
+ssh -i ~/.ssh/azure_rtc azureuser@<VM_PUBLIC_IP>
+```
+
+Install required packages:
 
 ```bash
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y python3 python3-pip tshark git
+sudo apt install -y python3 python3-pip tshark git wireguard qrencode whois
 ```
 
 ---
 
-## 3️⃣ Clone Repo & Set Up Capture API
+## 🧠 3️⃣ Clone Repo and Setup API Service
 
-1. Clone the `rtcproxy` repo:
+```bash
+sudo git clone https://github.com/<your-repo>/rtcproxy.git /opt/rtcproxy
+cd /opt/rtcproxy
+pip3 install -r requirements.txt
+```
 
-   ```bash
-   git clone https://github.com/<your-repo>/rtcproxy.git /opt/rtcproxy
-   cd /opt/rtcproxy
-   pip3 install -r requirements.txt
-   ```
+Ensure `api.py` and `check_dpi.py` exist:
 
-2. Make sure `check_dpi.py` exists in `/opt/rtcproxy`.
+```bash
+ls /opt/rtcproxy
+```
 
-3. **Setup the capture API** as a service:
+Create a systemd service:
 
-   ```bash
-   sudo tee /etc/systemd/system/rtcproxy.service <<EOF
-   [Unit]
-   Description=RTC Capture API
-   After=network.target
+```bash
+sudo tee /etc/systemd/system/rtcproxy.service <<EOF
+[Unit]
+Description=RTC Capture API
+After=network.target
 
-   [Service]
-   ExecStart=/usr/bin/python3 /opt/rtcproxy/api.py
-   WorkingDirectory=/opt/rtcproxy
-   Restart=always
-   User=azureuser
+[Service]
+ExecStart=/usr/bin/python3 /opt/rtcproxy/api.py
+WorkingDirectory=/opt/rtcproxy
+Restart=always
+User=azureuser
 
-   [Install]
-   WantedBy=multi-user.target
-   EOF
-   ```
+[Install]
+WantedBy=multi-user.target
+EOF
+```
 
-4. Enable + start the service:
+Enable and start the API:
 
-   ```bash
-   sudo systemctl daemon-reexec
-   sudo systemctl enable rtcproxy
-   sudo systemctl start rtcproxy
-   sudo systemctl status rtcproxy
-   ```
+```bash
+sudo systemctl daemon-reexec
+sudo systemctl enable rtcproxy
+sudo systemctl start rtcproxy
+sudo systemctl status rtcproxy
+```
 
-   API should now run at `http://<VM_IP>:5000/`.
----
-
-## 4️⃣ WireGuard Setup
-
-1. Install WireGuard + QR utility:
-
-   ```bash
-   sudo apt update
-   sudo apt install -y wireguard qrencode
-   ```
-
-2. Generate server keys:
-
-   ```bash
-   umask 077
-   wg genkey | tee server_private.key | wg pubkey > server_public.key
-   ```
-
-3. Configure `wg0.conf` on VM:
-
-   ```ini
-   [Interface]
-   PrivateKey = <SERVER_PRIVATE_KEY>
-   Address = 10.8.0.1/24
-   ListenPort = 51820
-   ```
-
-   Save this file:
-
-   ```bash
-   sudo nano /etc/wireguard/wg0.conf
-   ```
-
-4. Generate phone (client) config:
-
-   ```bash
-   wg genkey | tee phone_private.key | wg pubkey > phone_public.key
-   ```
-
-   Create `phone.conf`:
-
-   ```ini
-   [Interface]
-   PrivateKey = <PHONE_PRIVATE_KEY>
-   Address = 10.8.0.2/24
-   DNS = 1.1.1.1
-
-   [Peer]
-   PublicKey = <SERVER_PUBLIC_KEY>
-   Endpoint = <VM_PUBLIC_IP>:51820
-   AllowedIPs = 0.0.0.0/0, ::/0
-   PersistentKeepalive = 25
-   ```
-
-5. Show QR code for phone:
-
-   ```bash
-   qrencode -t ansiutf8 < phone.conf
-   ```
-
-   👉 On your phone: Open WireGuard app → *Add Tunnel* → *Scan QR code*.
-
-6. Enable WireGuard service:
-
-   ```bash
-   sudo wg-quick up wg0
-   sudo systemctl enable wg-quick@wg0
-   ```
-
-7. Verify tunnel:
-
-   ```bash
-   sudo wg show
-   ping 10.8.0.2
-   ```
+> Should show **active (running)** and **Listening on 0.0.0.0:5000**
 
 ---
 
-## 5️⃣ Local Controller Setup
+## 🔐 4️⃣ WireGuard Setup (Phone ↔ VM)
 
-On your Windows machine, ensure:
+### **On the VM**
 
-* `rtc_capture.ps1` script is present.
-* `scp` and `ssh` work with your private key.
+```bash
+sudo apt install -y wireguard qrencode
+umask 077
+wg genkey | tee server_private.key | wg pubkey > server_public.key
+```
 
-Adjust the script config:
+Edit `/etc/wireguard/wg0.conf`:
+
+```
+[Interface]
+PrivateKey = <SERVER_PRIVATE_KEY>
+Address = 10.8.0.1/24
+ListenPort = 51820
+```
+
+Generate client keys:
+
+```bash
+wg genkey | tee phone_private.key | wg pubkey > phone_public.key
+```
+
+Create `phone.conf`:
+
+```
+[Interface]
+PrivateKey = <PHONE_PRIVATE_KEY>
+Address = 10.8.0.2/24
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = <SERVER_PUBLIC_KEY>
+Endpoint = <VM_PUBLIC_IP>:51820
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+```
+to get your phone's keys and your VM keys use cat commands. (ex: cat server_public.key)
+Show QR for your phone:
+
+```bash
+qrencode -t ansiutf8 < phone.conf
+```
+
+📱 **On your phone:** Open WireGuard → “Add Tunnel” → “Scan QR Code”
+
+Start the VPN:
+
+```bash
+sudo wg-quick up wg0
+sudo systemctl enable wg-quick@wg0
+sudo wg
+```
+
+✅ You should see a live handshake.
+
+---
+
+## 💻 5️⃣ Local Controller (Windows Machine)
+
+Make sure you have:
+
+* `rtc_capture.ps1` script in `C:\Users\chand`
+* `scp` and `ssh` accessible from PowerShell (`where ssh` should show OpenSSH path)
+* Your private key:
+  `C:\Users\chand\.ssh\azure_rtc.pem`
+
+Edit the top of `rtc_capture.ps1`:
 
 ```powershell
-$VM1_IP   = "<VM1_PUBLIC_IP>"
-$VM2_IP   = "<VM2_PUBLIC_IP>"
-$SSH_KEY  = "C:\Users\<you>\.ssh\azure_rtc.pem"
-$USER     = "azureuser"
+$VM1_IP    = "20.55.35.218"
+$VM2_IP    = "20.24.57.248"
+$SSH_KEY   = "C:\Users\chand\.ssh\azure_rtc.pem"
+$USER      = "azureuser"
+$BASE_DIR  = "C:\Users\chand\captures"
+$BLOCK_FILE = "$BASE_DIR\blocking.txt"
+$IPINFO_TOKEN = "YOUR_TOKEN_HERE"  # Optional
+$REGION1   = "west-europe"
+$REGION2   = "south-east-asia"
 ```
 
 ---
 
-## 6️⃣ Running a Capture
-This rtc_capture.ps1 script should be in "C:/Users/chand"
+## 🧪 6️⃣ Running a Capture
 
-1. Start a Zoom/WhatsApp/Messenger/Google Meet call between the endpoints (or from one VM if testing loop).
+Turn **on WireGuard** on both phones.
+Start a Zoom / Meet / WhatsApp / Teams call.
+Then, in PowerShell:
 
-2. Run the controller script:
+```powershell
+cd C:\Users\chand
+.\rtc_capture.ps1
+```
 
-   ```powershell
-   .\rtc_capture.ps1
-   ```
+✅ The script will:
 
-3. Script workflow:
-
-   * Starts capture on both VMs (`/start` API).
-   * Collects traffic for 30s.
-   * Stops capture (`/stop` API).
-   * Downloads PCAPs to local `C:\Users\chand\captures\us-east-europe-west-run_<N>\`.
-   * Runs DPI analysis (`check_dpi.py`) on each VM.
-   * Prints + saves relay IP + geolocation + service name.
+1. Start capture on both VMs (`/start`)
+2. Record for 30 seconds
+3. Stop capture (`/stop`)
+4. Download PCAPs
+5. Run `check_dpi.py` remotely
+6. Show relay IPs, geolocation, and top IPs
+7. Offer to block detected relays (iptables)
 
 ---
 
-## 7️⃣ Output Layout
-
-Example Zoom call:
+## 📊 7️⃣ Example Output
 
 ```
 ========== ANALYSIS DONE ==========
 VM1 (20.55.35.218):
-Relay found from DPI: 206.247.43.41 (San Jose, United States, Zoom)
+Relay found from DPI: 206.247.43.41 (San Jose, US, Zoom)
 
 Top 5 IPs:
 206.247.43.41, 61k pkts (relay)
+151.101.3.6, 418 pkts
+1.0.0.1, 98 pkts
+
+VM2 (20.24.57.248):
+Relay found from DPI: 206.247.43.41 (San Jose, US, Zoom)
 ...
-
-Saved to: C:\Users\chand\captures\us-east-europe-west-run_59\vm1-analysis.txt
-
-VM2 (20.56.16.9):
-Relay found from DPI: 206.247.43.41 (San Jose, United States, Zoom)
-
-Top 5 IPs:
-206.247.43.41, 80k pkts (relay)
-...
-
 ===================================
-Captured files stored in: C:\Users\chand\captures\us-east-europe-west-run_59
+Captured files stored in: C:\Users\chand\captures\west-europe-south-east-asia-run_5
 ```
-
-* **Relay IP**: The main IP handling RTP.
-* **Location**: City + Country (via DPI + ip-api lookup).
-* **Service**: Zoom, WhatsApp, Messenger, Meet, etc.
-* **Top 5 IPs**: Ranked by packet count.
 
 ---
 
-## 8️⃣ Notes & Gotchas
+## 🚫 8️⃣ Blocking Relay Subnets Automatically
 
-* **Meta Services (WhatsApp, Messenger, Instagram)** → all use the same Meta relay infra. Relay IPs will be owned by *Facebook/Meta*. To distinguish WhatsApp vs Messenger requires packet signature/port heuristics.
-* **DNS IPs (1.1.1.1, 8.8.8.8)** are filtered out in output.
-* If output has `?`, fallback API lookup fills missing fields.
-* **Service Map** in script maps ASNs/ISPs to known apps.
+When prompted:
+
+```
+Relay IP detected: 206.247.43.41
+Press 'b' to block this relay subnet 206.247.0.0/16 (or Enter to skip):
+```
+
+If you press **b**, the script:
+
+* Adds subnet to `blocking.txt`
+* Applies `iptables` rules on both VMs:
+
+  ```
+  sudo iptables -I FORWARD -d <subnet> -j DROP
+  sudo iptables -I FORWARD -s <subnet> -j DROP
+  sudo iptables -I OUTPUT -d <subnet> -j DROP
+  sudo iptables -I INPUT -s <subnet> -j DROP
+  ```
+
+---
+
+## 💡 9️⃣ Notes & Gotchas
+
+* Uses **ipinfo.io** for location lookup (replace `YOUR_TOKEN_HERE` with real token).
+* Private IPs (`172.x`, `192.168.x`) are skipped — those are internal tunnels.
+* If `check_dpi.py` shows only `172.x` IPs, you’ve blocked all public relays — the app may fall back to local peers.
+* Output and logs are stored per run under:
+
+  ```
+  C:\Users\chand\captures\<region1>-<region2>-run_<N>\
+  ```
 
 * **For business accounts**, we have set up 2 accounts for Zoom, Google Meet, and Microsoft Teams. See login instructions [here](https://docs.google.com/spreadsheets/d/1mPv7KNgY9s4xKgqWKOYSE27-RdRJQZg1zn9V6VfSwWg/edit?gid=0#gid=0). The accounts are paid monthly.
 
 
 ---
 
-Place your Azure private key (azure_rtc.pem) in C:\Users\chand\.ssh\ and ensure the captures folder exists at C:\Users\chand\captures.
+## ⚡ That’s It!
 
-⚡ That’s it! With these steps, you can spin up new VMs anytime and immediately start measuring RTC relays.
