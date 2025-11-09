@@ -47,7 +47,7 @@ Install required packages:
 
 ```bash
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y python3 python3-pip tshark git wireguard qrencode whois
+sudo apt install -y tshark git wireguard qrencode whois
 ```
 
 Install python:
