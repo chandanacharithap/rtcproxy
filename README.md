@@ -83,10 +83,11 @@ Description=RTC Capture API
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/rtcproxy/api.py
+ExecStart=/home/azureuser/.venvs/rtcproxy/bin/python /opt/rtcproxy/api.py
 WorkingDirectory=/opt/rtcproxy
 Restart=always
 User=azureuser
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target
