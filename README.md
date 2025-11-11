@@ -94,7 +94,6 @@ After=network.target
 
 [Service]
 User=azureuser
-LogsDirectory=rtc
 ExecStart=/home/azureuser/.venvs/rtcproxy/bin/python /opt/rtcproxy/api.py
 WorkingDirectory=/opt/rtcproxy
 Restart=always
