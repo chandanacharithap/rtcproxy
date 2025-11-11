@@ -276,7 +276,9 @@ qrencode -t ansiutf8 < "$WG_DIR/phone2.conf"
 wg | sed -n '1,30p' || true
 ```
 
-On your phones: open WireGuard → “Add Tunnel” → “Scan QR Code” for both Phone 1 and Phone 2. After connecting, you should check your external IP at [whatismyipaddress.com](https://www.whatismyipaddress.com). It should show your VM's IP address and geolocation. Once you've verified that, the installation of the VPN is a success.
+On your phones: open WireGuard → “Add Tunnel” → “Scan QR Code” for both Phone 1 and Phone 2. **Make sure you scan the 2 QR codes on different phones. This is a super super super important step to support future test "caller and callee in the same location", as we will be using the same VM to delegate the media traffic for both the caller and callee phones.** 
+
+After connecting, you should check your external IP at [whatismyipaddress.com](https://www.whatismyipaddress.com). It should show your VM's IP address and geolocation. Once you've verified that, the installation of the VPN is a success.
 
 ![VPN connection validation](docs/figures/whatismyipaddress.png)
 
