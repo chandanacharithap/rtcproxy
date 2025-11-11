@@ -9,6 +9,16 @@ It supports **relay IP detection**, **ASN/CIDR blocking**, and **geolocation loo
 
 ### **Create 2 Ubuntu VMs**
 
+<!-- put in the AzureVMProvision.png here -->
+![Azure VM Provision Example](docs/figures/AzureVMProvision.png)
+1. Put all your 13 VMs in one resource group (e.g. RTC)
+2. VM name put `RTC-<Your Application>-<Location>-<Name>` (for quicker search and resource usage check)
+3. Choose a relay based on the following regions
+   ![13 VM locations](docs/figures/13VMLocations.png)
+4. Size: pick the cheapest VM you can get. If it says unavailable, you shall either pick a more expensive one, or change zone (see availability zone)
+5. Don't change "azureuser" as the username. Our script sticks to this name to run.
+6. Upload your key to Azure to reuse for all servers.
+
 * Region examples: `West Europe` and `Southeast Asia`
 * **Size:** 2 vCPUs, 4 GB RAM (Standard_B2s works fine)
 * **Image:** Ubuntu Server 20.04 LTS or 22.04 LTS
@@ -63,7 +73,7 @@ source "$HOME/.venvs/rtcproxy/bin/activate"
 ## 🧠 3️⃣ Clone Repo and Setup API Service
 
 ```bash
-sudo git clone https://github.com/<your-repo>/rtcproxy.git /opt/rtcproxy
+sudo git clone https://github.com/chandanacharithap/rtcproxy.git /opt/rtcproxy
 cd /opt/rtcproxy
 pip3 install -r requirements.txt
 ```
@@ -83,10 +93,11 @@ Description=RTC Capture API
 After=network.target
 
 [Service]
+User=azureuser
+LogsDirectory=rtc
 ExecStart=/home/azureuser/.venvs/rtcproxy/bin/python /opt/rtcproxy/api.py
 WorkingDirectory=/opt/rtcproxy
 Restart=always
-User=azureuser
 Environment=PYTHONUNBUFFERED=1
 
 [Install]
@@ -109,61 +120,183 @@ sudo systemctl status rtcproxy
 
 ## 🔐 4️⃣ WireGuard Setup (Phone ↔ VM)
 
-### **On the VM**
+This section turns the VM into a routable WireGuard server and auto-generates two phone client configs with QR codes (IPv4/IPv6 forwarding, NAT, MSS clamp). Only Part 0 and Part A are covered here; the rtcproxy service is in the next section.
+
+### Part 0 — Become root (stay root)
+
+Run after SSH into the VM:
 
 ```bash
-sudo apt install -y wireguard qrencode
+sudo -i
+set -euxo pipefail
+export DEBIAN_FRONTEND=noninteractive
+```
+
+### Part A — WireGuard server + routing + QR codes (runs as root)
+
+1) Packages
+
+```bash
+apt-get update -y
+apt-get install -y wireguard wireguard-tools qrencode tcpdump curl \
+                   iptables-persistent netfilter-persistent
+```
+
+2) Kernel routing & rp_filter (persist + live)
+
+```bash
+tee /etc/sysctl.d/99-wg-routing.conf >/dev/null <<'SYS'
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.conf.default.rp_filter=0
+SYS
+
+sysctl --system >/dev/null
+sysctl -w net.ipv4.ip_forward=1
+sysctl -w net.ipv6.conf.all.forwarding=1
+sysctl -w net.ipv4.conf.all.rp_filter=0
+sysctl -w net.ipv4.conf.default.rp_filter=0
+```
+
+3) Generate keys (idempotent) & build configs
+
+```bash
+WG_IF=wg0
+WG_DIR=/etc/wireguard
+KEEPALIVE=25
+DNS_ADDR=1.1.1.1
+
 umask 077
-wg genkey | tee server_private.key | wg pubkey > server_public.key
+mkdir -p "$WG_DIR"; chmod 700 "$WG_DIR"; cd "$WG_DIR"
+[ -f server_private.key ] || (wg genkey | tee server_private.key | wg pubkey > server_public.key)
+[ -f phone1_private.key ] || (wg genkey | tee phone1_private.key | wg pubkey > phone1_public.key)
+[ -f phone2_private.key ] || (wg genkey | tee phone2_private.key | wg pubkey > phone2_public.key)
+
+SERVER_PRIV="$(cat server_private.key)"
+SERVER_PUB="$(cat server_public.key)"
+P1_PRIV="$(cat phone1_private.key)"
+P1_PUB="$(cat phone1_public.key)"
+P2_PRIV="$(cat phone2_private.key)"
+P2_PUB="$(cat phone2_public.key)"
+
+SERVER_ADDR=10.8.0.1/24
+P1_ADDR=10.8.0.2/24
+P2_ADDR=10.8.0.3/24
+
+# Detect egress NIC (Azure typically eth0)
+EGRESS_IF="$(ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++){if($i=="dev"){print $(i+1); exit}}}')" || true
+[ -z "$EGRESS_IF" ] && EGRESS_IF=eth0
+
+# Autodetect public IP for client Endpoint
+ENDPOINT="$(curl -s ifconfig.me 2>/dev/null):51820"
 ```
 
-Edit `/etc/wireguard/wg0.conf`:
-
-```
-[Interface]
-PrivateKey = <SERVER_PRIVATE_KEY>
-Address = 10.8.0.1/24
-ListenPort = 51820
-```
-
-Generate client keys:
+4) Server config (NAT, forward accept, MSS clamp, MTU)
 
 ```bash
-wg genkey | tee phone_private.key | wg pubkey > phone_public.key
-```
-
-Create `phone.conf`:
-
-```
+cat > "$WG_DIR/${WG_IF}.conf" <<EOF
 [Interface]
-PrivateKey = <PHONE_PRIVATE_KEY>
-Address = 10.8.0.2/24
-DNS = 1.1.1.1
+PrivateKey = ${SERVER_PRIV}
+Address    = ${SERVER_ADDR}
+ListenPort = 51820
+MTU        = 1380
+
+# NAT + FORWARD accept + MSS clamp (up/down)
+PostUp   = iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o ${EGRESS_IF} -j MASQUERADE
+PostUp   = iptables -A FORWARD -i ${WG_IF} -j ACCEPT
+PostUp   = iptables -A FORWARD -o ${WG_IF} -j ACCEPT
+PostUp   = iptables -t mangle -A FORWARD -i ${WG_IF} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables -t nat -D POSTROUTING -s 10.8.0.0/24 -o ${EGRESS_IF} -j MASQUERADE
+PostDown = iptables -D FORWARD -i ${WG_IF} -j ACCEPT
+PostDown = iptables -D FORWARD -o ${WG_IF} -j ACCEPT
+PostDown = iptables -t mangle -D FORWARD -i ${WG_IF} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 [Peer]
-PublicKey = <SERVER_PUBLIC_KEY>
-Endpoint = <VM_PUBLIC_IP>:51820
+# Phone 1
+PublicKey  = ${P1_PUB}
+AllowedIPs = 10.8.0.2/32
+PersistentKeepalive = ${KEEPALIVE}
+
+[Peer]
+# Phone 2
+PublicKey  = ${P2_PUB}
+AllowedIPs = 10.8.0.3/32
+PersistentKeepalive = ${KEEPALIVE}
+EOF
+```
+
+5) Generate two phone client configs and QR codes
+
+```bash
+# Phone 1
+cat > "$WG_DIR/phone1.conf" <<EOF
+[Interface]
+PrivateKey = ${P1_PRIV}
+Address    = ${P1_ADDR}
+DNS        = ${DNS_ADDR}
+
+[Peer]
+PublicKey  = ${SERVER_PUB}
+Endpoint   = ${ENDPOINT}
 AllowedIPs = 0.0.0.0/0, ::/0
-PersistentKeepalive = 25
+PersistentKeepalive = ${KEEPALIVE}
+EOF
+
+# Phone 2
+cat > "$WG_DIR/phone2.conf" <<EOF
+[Interface]
+PrivateKey = ${P2_PRIV}
+Address    = ${P2_ADDR}
+DNS        = ${DNS_ADDR}
+
+[Peer]
+PublicKey  = ${SERVER_PUB}
+Endpoint   = ${ENDPOINT}
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = ${KEEPALIVE}
+EOF
 ```
-to get your phone's keys and your VM keys use cat commands. (ex: cat server_public.key)
-Show QR for your phone:
+
+6) Harden permissions, enable service, and show QR codes
 
 ```bash
-qrencode -t ansiutf8 < phone.conf
+chown root:root "$WG_DIR"/*.conf "$WG_DIR"/*.key
+chmod 600 "$WG_DIR"/*.conf "$WG_DIR"/*.key
+
+systemctl enable wg-quick@${WG_IF}
+systemctl restart wg-quick@${WG_IF}
+
+echo '=========== Phone 1 (scan) ==========='
+qrencode -t ansiutf8 < "$WG_DIR/phone1.conf"
+echo '=========== Phone 2 (scan) ==========='
+qrencode -t ansiutf8 < "$WG_DIR/phone2.conf"
+
+# Quick sanity
+wg | sed -n '1,30p' || true
 ```
 
-📱 **On your phone:** Open WireGuard → “Add Tunnel” → “Scan QR Code”
+On your phones: open WireGuard → “Add Tunnel” → “Scan QR Code” for both Phone 1 and Phone 2. After connecting, you should check your external IP at [whatismyipaddress.com](https://www.whatismyipaddress.com). It should show your VM's IP address and geolocation. Once you've verified that, the installation of the VPN is a success.
 
-Start the VPN:
+![VPN connection validation](docs/figures/whatismyipaddress.png)
 
-```bash
-sudo wg-quick up wg0
-sudo systemctl enable wg-quick@wg0
-sudo wg
+**Naming of the VPN nodes on WireGuard mobile App**
+The naming of all 13 VPN nodes can affect the application automation script as it iterates over the 13 VPN nodes. You should name it as follows:
 ```
-
-✅ You should see a live handshake.
+rtc-east-us
+rtc-central-us
+rtc-west-us
+rtc-south-central-us
+rtc-chile-central
+rtc-uk-south
+rtc-poland-central
+rtc-uae-south
+rtc-japan-east
+rtc-central-india
+rtc-south-africa-north
+rtc-australia-east
+rtc-malaysia-west
+```
 
 ---
 
