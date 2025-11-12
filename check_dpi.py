@@ -12,11 +12,13 @@ import json
 import time
 import multiprocessing
 import subprocess
+import ipaddress
 
 
 protocol = "rtp"  # can be "rtp" or "stun" or "rtcp" or "classicstun"
 
 debug = False
+PRINT_DETAILS = True
 
 start_packet_index = 1
 end_packet_index = 275396
@@ -199,11 +201,62 @@ def safe_lookup_ip(ip: str) -> dict:
     return info
 
 
+def is_public_routable_ip(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+        if addr.is_private:
+            return False
+        if addr.is_loopback:
+            return False
+        if addr.is_link_local:
+            return False
+        if addr.is_multicast:
+            return False
+        if addr.is_unspecified:
+            return False
+        if addr.is_reserved:
+            return False
+        return True
+    except Exception:
+        return False
+
 def validate_rtp_info_list(message_info_list, packet_count):
+    global ssrc_set
+    # 先按 Flow 分组（与输出时一致：含 src/dst ip/port、ssrc、payload_type）
+    flow_groups = defaultdict(list)
+    for pkt in message_info_list:
+        flow_id = (
+            pkt["flow_info"]["src_ip"],
+            pkt["flow_info"]["dst_ip"],
+            pkt["flow_info"]["src_port"],
+            pkt["flow_info"]["dst_port"],
+            pkt["ssrc"],
+            pkt["payload_type"],
+        )
+        flow_groups[flow_id].append(pkt)
+
+    # 过滤掉包数 <= 3 的 flow；再删除重复 seq_num 数量>=10 的包；之后若剩余包数<10 则整体剔除
+    filtered_message_info_list = []
+    for flow_id, messages in flow_groups.items():
+        if len(messages) <= 3:
+            continue
+        # 如果该 flow 的所有包的 seq_num 都相同，则剔除
+        seq_counts_all = Counter(pkt["seq_num"] for pkt in messages)
+        if len(seq_counts_all) <= 1:
+            continue
+        # 删除重复 seq_num 计数 >= 10 的所有包
+        messages_dedup = [pkt for pkt in messages if seq_counts_all[pkt["seq_num"]] < 10]
+        # 经过上一步后，如果该 flow 的包数 < 10，则剔除
+        if len(messages_dedup) < 10:
+            continue
+        filtered_message_info_list.extend(messages_dedup)
+
+    # 基于过滤后的列表统计 Relay IP
     relay_ips = Counter()
-    for msg in message_info_list:
+    for msg in filtered_message_info_list:
         dst_ip = msg["flow_info"]["dst_ip"]
-        relay_ips[dst_ip] += 1
+        if is_public_routable_ip(dst_ip):
+            relay_ips[dst_ip] += 1
 
     print("Relay IPs (from RTP flows):")
     for ip, count in relay_ips.most_common():
@@ -218,7 +271,40 @@ def validate_rtp_info_list(message_info_list, packet_count):
         except Exception as e:
             print(f"{ip}\tpackets={count} | lookup failed: {e}")
 
-    return message_info_list
+    # 打印逐包详情（与 Protocol_compliance 版本一致）
+    if PRINT_DETAILS:
+        print("RTP Info:")
+        # 重新按 flow 分组，仅遍历保留的 flows
+        debug_flow_group = defaultdict(list)
+        for pkt in filtered_message_info_list:
+            flow_id = (
+                pkt["flow_info"]["src_ip"],
+                pkt["flow_info"]["dst_ip"],
+                pkt["flow_info"]["src_port"],
+                pkt["flow_info"]["dst_port"],
+                pkt["ssrc"],
+                pkt["payload_type"],
+            )
+            debug_flow_group[flow_id].append(pkt)
+        for flow_id, messages in debug_flow_group.items():
+            print(
+                f"Flow {flow_id[0]}:{flow_id[2]} -> {flow_id[1]}:{flow_id[3]} PT={flow_id[5]}: {len(messages)} packets"
+            )
+            for pkt in messages:
+                print(
+                    f"  Packet {pkt['packet_index']} (chopped {pkt['chopped_bytes']} bytes), "
+                    f"SSRC: {pkt['ssrc']}, Seq Num: {pkt['seq_num']}, Version: {pkt['version']}, "
+                    f"Padding: {pkt['padding']}, Extension: {pkt['extension']}, CC: {pkt['cc']}, "
+                    f"Marker: {pkt['marker']}, Payload Type: {pkt['payload_type']}, Timestamp: {pkt['timestamp']}"
+                )
+
+    # 记录发现到的 SSRC，便于后续 RTCP 过滤使用（仅基于保留的 flows）
+    try:
+        ssrc_set = set(pkt["ssrc"] for pkt in filtered_message_info_list)
+    except Exception:
+        pass
+
+    return filtered_message_info_list
 
 
 def validate_stun_info_list(message_info_list, packet_count):
@@ -229,7 +315,7 @@ def validate_stun_info_list(message_info_list, packet_count):
         if message_info["msg_length"] * 2 != len(message_info["attributes_string"]):
             message_info_list.remove(message_info)
 
-    if 1:
+    if PRINT_DETAILS:
         print("STUN Info:")
         for message_info in message_info_list:
             print(
@@ -242,7 +328,7 @@ def validate_stun_info_list(message_info_list, packet_count):
 
 
 def validate_classic_stun_info_list(message_info_list, packet_count):
-    if 1:
+    if PRINT_DETAILS:
         print("Classic STUN Info:")
         for message_info in message_info_list:
             print(
@@ -264,7 +350,7 @@ def validate_rtcp_info_list(message_info_list, packet_count):
             filtered_message_info_list.append(message_info)
 
     print(f"length of message_info_list after removing: {len(filtered_message_info_list)}")
-    if 1:
+    if PRINT_DETAILS:
         print("RTCP Info:")
         for message_info in filtered_message_info_list:
             print(f"  RTCP Packet {message_info['packet_index']} (chopped {message_info['chopped_bytes']} bytes), SSRC: {message_info['ssrc']}, Payload Type: {message_info['packet_type']}")
@@ -341,7 +427,7 @@ def read_pcapng(file_path):
                 udp_pkt = ip_pkt.data
                 udp_payload = bytes(udp_pkt.data)
 
-                for i in range(200):
+                for i in range(40):
                     udp_payload_slice = udp_payload[i:]
                     if protocol == "rtp":
                         rtp_info = detect_rtp(udp_payload_slice)
@@ -355,6 +441,8 @@ def read_pcapng(file_path):
                             }
                             rtp_info["chopped_bytes"] = i
                             rtp_info["packet_index"] = packet_index
+                            # 保存该包的捕获时间戳（UTC epoch 秒）
+                            rtp_info["capture_ts"] = timestamp
                             message_info_list.append(rtp_info)
                     if protocol == "stun":
                         stun_info = detect_stun(udp_payload_slice)
@@ -389,6 +477,7 @@ def read_pcapng(file_path):
         packet_index_set = set(message_info["packet_index"] for message_info in filtered_message_info_list)
         print(f"Total RTP packets found: {len(packet_index_set)}")
         print(f"Total RTP messages found: {len(filtered_message_info_list)}")
+        return filtered_message_info_list
     if protocol == "stun":
         filtered_message_info_list = validate_stun_info_list(message_info_list, len(packet_indices))
         packet_index_set = set(message_info["packet_index"] for message_info in filtered_message_info_list)
@@ -399,6 +488,81 @@ def read_pcapng(file_path):
         packet_index_set = set(message_info["packet_index"] for message_info in filtered_message_info_list)
         print(f"Total RTCP packets found: {len(packet_index_set)}")
         print(f"Total RTCP messages found: {len(filtered_message_info_list)}")
+    return None
+
+def _rtp_match_key(pkt):
+    # 用于两端精准匹配的关键字段（必须完全一致）
+    return (
+        pkt.get("chopped_bytes"),
+        pkt.get("ssrc"),
+        pkt.get("seq_num"),
+        pkt.get("version"),
+        pkt.get("padding"),
+        pkt.get("extension"),
+        pkt.get("cc"),
+        pkt.get("marker"),
+        pkt.get("payload_type"),
+        pkt.get("timestamp"),
+    )
+
+def _flow_tuple(pkt):
+    fi = pkt["flow_info"]
+    return (fi["src_ip"], fi["src_port"], fi["dst_ip"], fi["dst_port"])
+
+def _reversed_flow_tuple(pkt):
+    fi = pkt["flow_info"]
+    return (fi["dst_ip"], fi["dst_port"], fi["src_ip"], fi["src_port"])
+
+def _median(values):
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    if n % 2 == 1:
+        return s[mid]
+    return (s[mid - 1] + s[mid]) / 2.0
+
+def compute_latency_between_lists(list_a, list_b, label_a, label_b):
+    # 在 list_b 构建索引：
+    # 1) 按关键字段精确匹配（不含 flow）索引
+    # 2) 同时保留按 (match_key, flow) 的索引以优先尝试“反向 flow”匹配
+    index_b_by_key = defaultdict(list)
+    index_b_by_key_and_flow = defaultdict(list)
+    for pkt in list_b:
+        mk = _rtp_match_key(pkt)
+        flow_b = _flow_tuple(pkt)
+        index_b_by_key[mk].append(pkt)
+        index_b_by_key_and_flow[(mk, flow_b)].append(pkt)
+
+    # 方向 A->B：需要 B 侧的 flow 等于 A 侧的 reversed flow
+    latencies_ms = []
+    matched = 0
+    for pkt in list_a:
+        mk = _rtp_match_key(pkt)
+        rev_flow = _reversed_flow_tuple(pkt)
+        # 优先尝试严格的“反向 flow”匹配
+        candidates = index_b_by_key_and_flow.get((mk, rev_flow))
+        selected = None
+        if candidates:
+            selected = candidates.pop()
+        else:
+            # 回退：仅按关键字段匹配（不强制 flow 反向）
+            candidates2 = index_b_by_key.get(mk)
+            if candidates2:
+                selected = candidates2.pop()
+        if selected:
+            matched += 1
+            t_a = float(pkt.get("capture_ts", 0.0))
+            t_b = float(selected.get("capture_ts", 0.0))
+            dt_ms = (t_b - t_a) * 1000.0
+            if dt_ms >= 0:
+                latencies_ms.append(dt_ms)
+
+    med = _median(latencies_ms)
+    avg = (sum(latencies_ms) / len(latencies_ms)) if latencies_ms else None
+    print(f"Latency {label_a}->{label_b}: matched={matched}, usable={len(latencies_ms)}, median_ms={med:.2f}" if med is not None else f"Latency {label_a}->{label_b}: matched={matched}, usable=0, median_ms=N/A")
+    return med, avg, matched, len(latencies_ms)
 
 
 def process_pcap_folder(folder_path):
@@ -470,14 +634,45 @@ def load_config(config_path="config.json"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="RTP/RTC packet analyzer")
-    parser.add_argument("--pcap", type=str, help="Path to a single pcap/pcapng file")
+    parser.add_argument("--pcap", nargs="+", type=str, help="Path(s) to pcap/pcapng file(s)")
     parser.add_argument("--multiprocess", action="store_true", help="Use multiprocessing for batch mode")
     parser.add_argument("--config", type=str, default=None, help="Path to the configuration file")
+    parser.add_argument("--save-details", action="store_true", help="Also write per-pcap details to dpi_found/<base>_dpi_detection.txt")
     args = parser.parse_args()
 
     if args.pcap:
-        protocol = "rtp"
-        read_pcapng(args.pcap)
+        rtp_lists_by_file = {}
+        for pcap_path in args.pcap:
+            # 先打印摘要到控制台（不含逐包详情）
+            PRINT_DETAILS = False
+            protocol = "rtp"
+            rtp_lists_by_file[pcap_path] = read_pcapng(pcap_path) or []
+            # 可选：把完整输出（含逐包详情）写入文件
+            if args.save_details:
+                if not os.path.exists("./dpi_found"):
+                    os.makedirs("./dpi_found")
+                base_name = os.path.splitext(pcap_path)[0].split("/")[-1]
+                report_path = f"./dpi_found/{base_name}_dpi_detection.txt"
+                with open(report_path, "w", encoding="utf-8") as f:
+                    PRINT_DETAILS = True
+                    with redirect_stdout(f):
+                        protocol = "rtp"
+                        read_pcapng(pcap_path)
+            # 分隔不同文件的控制台输出
+            print("")
+        # 若传入至少两个 pcap，则进行跨端配对与延迟计算
+        if len(args.pcap) >= 2:
+            a, b = args.pcap[0], args.pcap[1]
+            label_a = os.path.splitext(os.path.basename(a))[0]
+            label_b = os.path.splitext(os.path.basename(b))[0]
+            list_a = rtp_lists_by_file.get(a, [])
+            list_b = rtp_lists_by_file.get(b, [])
+            med_ab, _, _, _ = compute_latency_between_lists(list_a, list_b, label_a, label_b)
+            med_ba, _, _, _ = compute_latency_between_lists(list_b, list_a, label_b, label_a)
+            if med_ab is not None and med_ba is not None:
+                print(f"Estimated RTT ({label_a}<->{label_b}) ms: {med_ab + med_ba:.2f}")
+            else:
+                print(f"Estimated RTT ({label_a}<->{label_b}) ms: N/A")
     elif args.config:
         config_path = args.config
         multiprocess = args.multiprocess

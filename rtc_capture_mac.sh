@@ -22,8 +22,43 @@ mkdir -p "$RUN_FOLDER"
 
 local_pcap1="${RUN_FOLDER}/${REGION1}-${REGION2}-vm1.pcap"
 local_pcap2="${RUN_FOLDER}/${REGION1}-${REGION2}-vm2.pcap"
-local_txt1="${RUN_FOLDER}/vm1-analysis.txt"
-local_txt2="${RUN_FOLDER}/vm2-analysis.txt"
+local_txt="${RUN_FOLDER}/${REGION1}-${REGION2}-analysis.txt"
+
+# ===== 确保远端 /opt/rtcproxy 为最新 =====
+echo ">>> Updating /opt/rtcproxy on both VMs..."
+remote_update_cmd='
+set -e
+if [ -d /opt/rtcproxy ] && [ -d /opt/rtcproxy/.git ]; then
+  cd /opt/rtcproxy
+  git fetch --all --prune --tags || true
+  # 解析 origin 默认分支（如 origin/main）
+  defref=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  defbranch=""
+  if [ -n "$defref" ]; then
+    defbranch="${defref#origin/}"
+  else
+    # 回退：优先 main，再 master
+    if git show-ref --quiet --verify refs/remotes/origin/main; then
+      defbranch="main"
+    elif git show-ref --quiet --verify refs/remotes/origin/master; then
+      defbranch="master"
+    fi
+  fi
+  if [ -n "$defbranch" ]; then
+    git reset --hard "origin/${defbranch}" || true
+  else
+    git pull --ff-only --rebase || true
+  fi
+  # 依赖尽量安装，不阻塞主流程
+  if [ -f requirements.txt ]; then
+    python3 -m pip install -r requirements.txt >/dev/null 2>&1 || true
+  fi
+else
+  echo "/opt/rtcproxy not a git repo; skip update."
+fi
+'
+ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${USER}@${VM1_IP}" "bash -lc '$remote_update_cmd'" >/dev/null 2>&1 || true
+ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${USER}@${VM2_IP}" "bash -lc '$remote_update_cmd'" >/dev/null 2>&1 || true
 
 # 简单封装带可选 API_KEY 的 POST
 curl_post() {
@@ -141,27 +176,15 @@ END{
 	done
 }
 
-echo ">>> Running check_dpi.py on both VMs..."
-vm1_raw=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${USER}@${VM1_IP}" "python3 /opt/rtcproxy/check_dpi.py --pcap \"${pcap1}\"" 2>/dev/null || true)
-vm2_raw=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${USER}@${VM2_IP}" "python3 /opt/rtcproxy/check_dpi.py --pcap \"${pcap2}\"" 2>/dev/null || true)
-
-# 先以 VM1 的结果确定 relay，再用 VM2 输出时标注
-vm1_out=$(printf "%s" "$vm1_raw" | format_analysis)
-relay_ip="${RELAY_IP:-}"
-vm2_out=$(printf "%s" "$vm2_raw" | format_analysis)
-
-printf "%s\n" "$vm1_out" >"$local_txt1"
-printf "%s\n" "$vm2_out" >"$local_txt2"
+echo ">>> Running local DPI (check_dpi.py) on both PCAPs..."
+# 本地运行支持多 pcap 的 check_dpi.py，一次性输出两个文件的摘要和方向性延迟/RTT
+combined_raw=$(python3 /Users/apple/Documents/RTC/RTC_relay_infra/new/rtcproxy/check_dpi.py --pcap "$local_pcap1" "$local_pcap2" 2>/dev/null || true)
+printf "%s\n" "$combined_raw" >"$local_txt"
 
 echo ""
 echo "========== ANALYSIS DONE =========="
-echo "VM1 (${VM1_IP}):"
-echo "$vm1_out"
-echo "Saved to: $local_txt1"
-echo ""
-echo "VM2 (${VM2_IP}):"
-echo "$vm2_out"
-echo "Saved to: $local_txt2"
+echo "$combined_raw"
+echo "Saved to: $local_txt"
 echo "==================================="
 echo ""
 echo "Captured files stored in: $RUN_FOLDER"
