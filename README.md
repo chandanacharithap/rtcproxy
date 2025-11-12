@@ -87,6 +87,9 @@ ls /opt/rtcproxy
 Create a systemd service:
 
 ```bash
+sudo mkdir -p /var/log/rtc
+sudo chown azureuser:azureuser /var/log/rtc
+sudo chmod 777 /var/log/rtc
 sudo tee /etc/systemd/system/rtcproxy.service <<EOF
 [Unit]
 Description=RTC Capture API
@@ -139,6 +142,9 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y wireguard wireguard-tools qrencode tcpdump curl \
                    iptables-persistent netfilter-persistent
+which tcpdump
+sudo setcap cap_net_raw,cap_net_admin+eip "$(command -v tcpdump)"
+getcap "$(command -v tcpdump)"
 ```
 
 2) Kernel routing & rp_filter (persist + live)
