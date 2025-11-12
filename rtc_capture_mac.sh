@@ -2,13 +2,13 @@
 set -euo pipefail
 
 # ===== Config (请根据你的环境修改) =====
-VM1_IP="20.98.155.200"
-VM2_IP="20.243.134.81"
+VM1_IP="20.5.187.106"
+VM2_IP="4.240.95.132"
 SSH_KEY="~/.ssh/config/id_ed25519"
 USER="azureuser"
 BASE_DIR="$HOME/captures"
-REGION1="central-us"
-REGION2="japan-east"
+REGION1="australia-east"
+REGION2="central-india"
 # 如果你的远端 API 配置了密钥，这里填写；否则留空
 API_KEY=""
 

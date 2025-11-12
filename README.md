@@ -45,6 +45,14 @@ Go to each VM → **Networking → Add inbound port rules:**
 
 ---
 
+<span style="color:red"><b>For the rest of the installation, the easy way is:</b></span>
+
+```bash
+curl -sSL https://raw.githubusercontent.com/chandanacharithap/rtcproxy/main/install.sh | bash
+```
+
+
+
 ## ⚙️ 2️⃣ Install Dependencies on Each VM
 
 Connect via SSH:
@@ -142,9 +150,6 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y wireguard wireguard-tools qrencode tcpdump curl \
                    iptables-persistent netfilter-persistent
-which tcpdump
-sudo setcap cap_net_raw,cap_net_admin+eip "$(command -v tcpdump)"
-getcap "$(command -v tcpdump)"
 ```
 
 2) Kernel routing & rp_filter (persist + live)

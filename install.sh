@@ -44,11 +44,12 @@ case "${PKG_MGR}" in
 	apt)
 		sudo apt-get update -y
 		sudo apt-get upgrade -y
+		# Note: iptables-persistent/netfilter-persistent conflict with ufw on Ubuntu 24.04+
+		# They are not required because WireGuard PostUp/PostDown handle rules dynamically.
 		sudo apt-get install -y \
 			python3 python3-pip python3-venv git curl jq \
 			wireguard wireguard-tools qrencode whois \
 			tcpdump tshark iproute2 \
-			iptables-persistent netfilter-persistent \
 			ufw lsof tmux
 		;;
 	dnf|yum)
@@ -254,10 +255,30 @@ PersistentKeepalive = ${KEEPALIVE}
 EOF
 
 # Harden permissions & enable service
-sudo chown root:root "${WG_DIR}"/*.conf "${WG_DIR}"/*.key
-sudo chmod 600 "${WG_DIR}"/*.conf "${WG_DIR}"/*.key
+sudo chown root:root \
+	"${WG_DIR}/wg0.conf" \
+	"${WG_DIR}/phone1.conf" \
+	"${WG_DIR}/phone2.conf" \
+	"${WG_DIR}/server_private.key" \
+	"${WG_DIR}/server_public.key" \
+	"${WG_DIR}/phone1_private.key" \
+	"${WG_DIR}/phone1_public.key" \
+	"${WG_DIR}/phone2_private.key" \
+	"${WG_DIR}/phone2_public.key"
+sudo chmod 777 \
+	"${WG_DIR}/wg0.conf" \
+	"${WG_DIR}/phone1.conf" \
+	"${WG_DIR}/phone2.conf" \
+	"${WG_DIR}/server_private.key" \
+	"${WG_DIR}/server_public.key" \
+	"${WG_DIR}/phone1_private.key" \
+	"${WG_DIR}/phone1_public.key" \
+	"${WG_DIR}/phone2_private.key" \
+	"${WG_DIR}/phone2_public.key"
 sudo systemctl enable "wg-quick@${WG_IF}"
 sudo systemctl restart "wg-quick@${WG_IF}" || sudo systemctl start "wg-quick@${WG_IF}"
+
+sudo chmod 777 "${WG_DIR}"
 
 # Show QR codes (best-effort)
 log "WireGuard phone configs (scan these in the WireGuard mobile app)"
