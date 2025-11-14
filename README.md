@@ -37,7 +37,7 @@ Go to each VM → **Networking → Add inbound port rules:**
 
 | Purpose         | Port  | Protocol | Source | Action |
 | --------------- | ----- | -------- | ------ | ------ |
-| RTC Capture API | 5000  | TCP      | My IP  | Allow  |
+| RTC Capture API | 5000  | TCP      | Any    | Allow  |
 | WireGuard VPN   | 51820 | UDP      | Any    | Allow  |
 | SSH Access      | 22    | TCP      | My IP  | Allow  |
 
