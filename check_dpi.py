@@ -572,40 +572,30 @@ def process_pcap_folder(folder_path):
             if file.endswith(".pcap") or file.endswith(".pcapng"):
                 file_path = f"{root}/{file}"
                 print(f"processing file: {file_path}")
-                if not os.path.exists("./dpi_found"):
-                    os.makedirs("./dpi_found")
-                report_path = "./dpi_found/" + os.path.splitext(file_path)[0].split("/")[-1] + "_dpi_detection.txt"
-                if os.path.exists(report_path):
-                    os.remove(report_path)
-                with open(report_path, "w", encoding="utf-8") as f:
-                    with redirect_stdout(f):
-                        protocol = "stun"
-                        read_pcapng(file_path)
-                        protocol = "rtp"
-                        read_pcapng(file_path)
-                        protocol = "rtcp"
-                        read_pcapng(file_path)
-
-
-def process_pcap_file(file_path):
-    global protocol
-    if not os.path.exists("./dpi_found"):
-        os.makedirs("./dpi_found")
-    report_path = "./dpi_found/" + os.path.splitext(file_path)[0].split("/")[-1] + "_dpi_detection.txt"
-    if os.path.exists(report_path):
-        os.remove(report_path)
-    with open(report_path, "w", encoding="utf-8") as f:
-        with redirect_stdout(f):
-            if debug:
-                protocol = "rtp"
-                read_pcapng(file_path)
-            else:
+                # Process in-memory only; no file outputs
+                PRINT_DETAILS = False
                 protocol = "stun"
                 read_pcapng(file_path)
                 protocol = "rtp"
                 read_pcapng(file_path)
                 protocol = "rtcp"
                 read_pcapng(file_path)
+
+
+def process_pcap_file(file_path):
+    global protocol
+    # Process in-memory only; no file outputs
+    PRINT_DETAILS = False
+    if debug:
+        protocol = "rtp"
+        read_pcapng(file_path)
+    else:
+        protocol = "stun"
+        read_pcapng(file_path)
+        protocol = "rtp"
+        read_pcapng(file_path)
+        protocol = "rtcp"
+        read_pcapng(file_path)
 
 
 def load_config(config_path="config.json"):
@@ -637,7 +627,6 @@ if __name__ == "__main__":
     parser.add_argument("--pcap", nargs="+", type=str, help="Path(s) to pcap/pcapng file(s)")
     parser.add_argument("--multiprocess", action="store_true", help="Use multiprocessing for batch mode")
     parser.add_argument("--config", type=str, default=None, help="Path to the configuration file")
-    parser.add_argument("--save-details", action="store_true", help="Also write per-pcap details to dpi_found/<base>_dpi_detection.txt")
     args = parser.parse_args()
 
     if args.pcap:
@@ -647,17 +636,7 @@ if __name__ == "__main__":
             PRINT_DETAILS = False
             protocol = "rtp"
             rtp_lists_by_file[pcap_path] = read_pcapng(pcap_path) or []
-            # 可选：把完整输出（含逐包详情）写入文件
-            if args.save_details:
-                if not os.path.exists("./dpi_found"):
-                    os.makedirs("./dpi_found")
-                base_name = os.path.splitext(pcap_path)[0].split("/")[-1]
-                report_path = f"./dpi_found/{base_name}_dpi_detection.txt"
-                with open(report_path, "w", encoding="utf-8") as f:
-                    PRINT_DETAILS = True
-                    with redirect_stdout(f):
-                        protocol = "rtp"
-                        read_pcapng(pcap_path)
+            # Skip writing detailed outputs to files; keep processing in-memory only
             # 分隔不同文件的控制台输出
             print("")
         # 若传入至少两个 pcap，则进行跨端配对与延迟计算
