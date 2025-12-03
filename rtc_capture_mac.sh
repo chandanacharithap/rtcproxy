@@ -2,13 +2,14 @@
 set -euo pipefail
 
 # ===== Config (edit for your environment) =====
-VM1_IP="20.246.106.73"
-VM2_IP="20.246.106.73"
+# You only need to modify REGION1 / REGION2; VM1_IP and VM2_IP will be mapped automatically based on the region name.
+# If an unknown region is encountered, an error will be shown prompting you to add it to the mapping function.
+# If you do want to override the IP manually, you can export the environment variables VM1_IP/VM2_IP before running.
 SSH_KEY="~/.ssh/id_ed25519"
 USER="azureuser"
 BASE_DIR="$HOME/captures" # put this capture folder in your working directory
-REGION1="us-east"
-REGION2="us-east"
+REGION1="canada-east"
+REGION2="canada-east"
 APP="zoom" # zoom, whatsapp, messenger, discord, facetime, teams, googlemeet
 # Capture interface on VM:
 # - Use 'any' to capture both wg0 (inner RTP) and eth0 (NATed public relay) simultaneously.
@@ -17,6 +18,64 @@ IFACE="any"
 # If your remote API uses an API key, fill it here; otherwise leave empty
 API_KEY=""
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+# ===== 区域名 -> IP 映射（已内置 13 个地区；支持多种写法） =====
+get_ip_for_region() {
+	local region="$1"
+	# 归一化：小写、去掉前缀 rtc-、空格/下划线转为短横线
+	local key
+	key="$(printf "%s" "$region" | tr '[:upper:]' '[:lower:]')"
+	key="${key#rtc-}"
+	key="${key// /-}"
+	key="${key//_/-}"
+	case "$key" in
+		# us-east
+		"us-east"|"east-us") echo "172.200.238.240" ;;
+		# central-us
+		"central-us"|"us-central") echo "40.78.172.213" ;;
+		# west-us
+		"west-us"|"us-west") echo "172.184.159.0" ;;
+		# south-central-us
+		"south-central-us"|"us-south-central"|"southcentral-us") echo "20.114.65.229" ;;
+		# chile-central
+		"chile-central"|"central-chile") echo "57.156.58.197" ;;
+		# uk-south
+		"uk-south"|"south-uk") echo "172.166.200.53" ;;
+		# poland-central
+		"poland-central"|"central-poland") echo "20.215.249.204" ;;
+		# uae-north
+		"uae-north"|"north-uae") echo "20.74.220.56" ;;
+		# japan-east
+		"japan-east"|"east-japan") echo "4.189.136.130" ;;
+		# central-india
+		"central-india"|"india-central") echo "98.70.125.186" ;;
+		# south-africa-north
+		"south-africa-north"|"southafrica-north"|"north-south-africa") echo "40.120.25.50" ;;
+		# australia-east
+		"australia-east"|"east-australia") echo "68.218.11.9" ;;
+		# malaysia-west
+		"malaysia-west"|"west-malaysia") echo "85.211.199.90" ;;
+		# canada-east
+		"canada-east"|"east-canada") echo "4.239.98.217" ;;
+		*) return 1 ;;
+	esac
+}
+
+# 如果未通过环境变量显式指定 VM1_IP/VM2_IP，则根据区域名自动填充
+: "${VM1_IP:=}"
+: "${VM2_IP:=}"
+if [[ -z "${VM1_IP}" ]]; then
+	if ! VM1_IP="$(get_ip_for_region "${REGION1}")"; then
+		echo "错误：未知区域名 '${REGION1}'。请在脚本函数 get_ip_for_region 中添加该区域到 IP 的映射。" >&2
+		exit 1
+	fi
+fi
+if [[ -z "${VM2_IP}" ]]; then
+	if ! VM2_IP="$(get_ip_for_region "${REGION2}")"; then
+		echo "错误：未知区域名 '${REGION2}'。请在脚本函数 get_ip_for_region 中添加该区域到 IP 的映射。" >&2
+		exit 1
+	fi
+fi
 
 # ===== P2P control (force relay) =====
 # When both phones connect to the same VM via WireGuard, apps may use P2P over wg0 (10.8.0.2<->10.8.0.3).
@@ -59,6 +118,11 @@ if [[ "${VM1_IP}" == "${VM2_IP}" ]]; then
 fi
 
 echo ">>> Starting capture on both VMs..."
+# Ensure tcpdump has required capabilities on remote VMs before starting capture
+for ip in "$VM1_IP" "$VM2_IP"; do
+	ssh -i "$SSH_KEY" $SSH_OPTS "${USER}@${ip}" \
+		"sudo setcap cap_net_raw,cap_net_admin+eip \$(command -v tcpdump) || sudo setcap cap_net_raw,cap_net_admin+eip /usr/bin/tcpdump || true"
+done
 # Optionally force relay by blocking wg0<->wg0 forwarding (P2P) on both VMs
 # Activate only when both phones are on the same VM (VM1_IP == VM2_IP)
 if [[ "${P2P_BLOCK}" == "1" && "${VM1_IP}" == "${VM2_IP}" ]]; then
